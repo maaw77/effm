@@ -1,0 +1,7 @@
+db:
+  DB: postgres
+  User: postgres
+  Password: epas
+  Host: db
+  Port: 5433
+  PoolMaxConns: 7
