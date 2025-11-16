@@ -1,6 +1,7 @@
 // Package server реализует HTTP-сервер для работы с подписками.
 // Сервер использует Gin и предоставляет REST API для CRUD операций с подписками.
 // Подключение к базе данных выполняется через internal/database.
+// Обработчики используют DTO из internal/dto и модель Subscription из internal/models.
 package server
 
 import (
@@ -13,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/maaw77/effm/config"
 	"github.com/maaw77/effm/internal/database"
+	"github.com/maaw77/effm/internal/dto"
 	"github.com/maaw77/effm/internal/models"
 )
 
@@ -63,6 +65,13 @@ func (s *Server) registerRoutes() {
 
 // getSubscriptionHandler возвращает подписку по ID.
 // GET /api/subscriptions/:id
+// Параметры:
+//   - id (path) : UUID подписки
+//
+// Ответ:
+//   - 200 OK : SubscriptionResponse
+//   - 404 Not Found : если подписка не найдена
+//   - 500 Internal Server Error : при ошибке сервера
 func (s *Server) getSubscriptionHandler(c *gin.Context) {
 	id := c.Param("id")
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
@@ -78,23 +87,63 @@ func (s *Server) getSubscriptionHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
-	c.JSON(http.StatusOK, sub)
+
+	resp := dto.SubscriptionResponse{
+		ID:          sub.ID,
+		ServiceName: sub.ServiceName,
+		Price:       sub.Price,
+		UserID:      sub.UserID,
+		StartDate:   sub.StartDate.Format("01-2006"),
+		EndDate:     formatTimePtr(sub.EndDate),
+		CreatedAt:   sub.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:   sub.UpdatedAt.Format(time.RFC3339),
+		Status:      "active",
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // createSubscriptionHandler создаёт новую подписку.
 // POST /api/subscriptions
+// Тело запроса: CreateSubscriptionRequest
+// Ответ:
+//   - 201 Created : { "id": <UUID> }
+//   - 400 Bad Request : некорректное тело запроса
+//   - 409 Conflict : если подписка уже существует
+//   - 500 Internal Server Error : ошибка сервера
 func (s *Server) createSubscriptionHandler(c *gin.Context) {
-	var sub models.Subscription
-	if err := c.ShouldBindJSON(&sub); err != nil {
+	var req dto.CreateSubscriptionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
 
-	if sub.UserID == "" {
-		sub.UserID = uuid.New().String()
+	userID := req.UserID
+	if userID == "" {
+		userID = uuid.New().String()
 	}
-	if sub.StartDate.IsZero() {
-		sub.StartDate = time.Now()
+
+	start, err := parseMonthYear(req.StartDate)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start_date format"})
+		return
+	}
+
+	var endPtr *time.Time
+	if req.EndDate != nil {
+		end, err := parseMonthYear(*req.EndDate)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end_date format"})
+			return
+		}
+		endPtr = &end
+	}
+
+	sub := models.Subscription{
+		ServiceName: req.ServiceName,
+		Price:       req.Price,
+		UserID:      userID,
+		StartDate:   start,
+		EndDate:     endPtr,
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
@@ -115,12 +164,42 @@ func (s *Server) createSubscriptionHandler(c *gin.Context) {
 
 // updateSubscriptionHandler обновляет подписку по ID.
 // PUT /api/subscriptions/:id
+// Тело запроса: UpdateSubscriptionRequest
+// Ответ:
+//   - 200 OK : { "status": "updated" }
+//   - 404 Not Found : если подписка не найдена
+//   - 400 Bad Request : некорректное тело запроса
+//   - 500 Internal Server Error : ошибка сервера
 func (s *Server) updateSubscriptionHandler(c *gin.Context) {
 	id := c.Param("id")
-	var sub models.Subscription
-	if err := c.ShouldBindJSON(&sub); err != nil {
+	var req dto.UpdateSubscriptionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
+	}
+
+	sub := models.Subscription{}
+	if req.ServiceName != nil {
+		sub.ServiceName = *req.ServiceName
+	}
+	if req.Price != nil {
+		sub.Price = *req.Price
+	}
+	if req.StartDate != nil {
+		start, err := parseMonthYear(*req.StartDate)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start_date format"})
+			return
+		}
+		sub.StartDate = start
+	}
+	if req.EndDate != nil {
+		end, err := parseMonthYear(*req.EndDate)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end_date format"})
+			return
+		}
+		sub.EndDate = &end
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
@@ -141,6 +220,10 @@ func (s *Server) updateSubscriptionHandler(c *gin.Context) {
 
 // deleteSubscriptionHandler удаляет подписку по ID.
 // DELETE /api/subscriptions/:id
+// Ответ:
+//   - 200 OK : { "status": "deleted" }
+//   - 404 Not Found : если подписка не найдена
+//   - 500 Internal Server Error : ошибка сервера
 func (s *Server) deleteSubscriptionHandler(c *gin.Context) {
 	id := c.Param("id")
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
@@ -161,6 +244,12 @@ func (s *Server) deleteSubscriptionHandler(c *gin.Context) {
 
 // listSubscriptionsHandler возвращает список подписок.
 // GET /api/subscriptions?user_id=...
+// Параметры:
+//   - user_id (query, optional) : фильтрация по пользователю
+//
+// Ответ:
+//   - 200 OK : []SubscriptionResponse
+//   - 500 Internal Server Error : ошибка сервера
 func (s *Server) listSubscriptionsHandler(c *gin.Context) {
 	userID := c.Query("user_id")
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
@@ -172,5 +261,35 @@ func (s *Server) listSubscriptionsHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
-	c.JSON(http.StatusOK, subs)
+
+	var resp []dto.SubscriptionResponse
+	for _, sub := range subs {
+		resp = append(resp, dto.SubscriptionResponse{
+			ID:          sub.ID,
+			ServiceName: sub.ServiceName,
+			Price:       sub.Price,
+			UserID:      sub.UserID,
+			StartDate:   sub.StartDate.Format("01-2006"),
+			EndDate:     formatTimePtr(sub.EndDate),
+			CreatedAt:   sub.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:   sub.UpdatedAt.Format(time.RFC3339),
+			Status:      "active",
+		})
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// --- вспомогательные функции ---
+
+func parseMonthYear(s string) (time.Time, error) {
+	return time.Parse("01-2006", s)
+}
+
+func formatTimePtr(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	str := t.Format("01-2006")
+	return &str
 }
