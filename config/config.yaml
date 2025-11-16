@@ -1,7 +1,14 @@
+# Конфигурация базы данных
 db:
-  DB: postgres
-  User: postgres
-  Password: epas
-  Host: db
+  DB: "postgres"
+  User: "postgres"
+  Password: "epas"
+  Host: "localhost"
   Port: 5433
-  PoolMaxConns: 7
+  PoolMaxConns: 10
+
+# Конфигурация HTTP-сервера
+server:
+  Port: "8080"              # порт для запуска сервера
+  ReadTimeout: 5s           # таймаут чтения запроса
+  WriteTimeout: 5s          # таймаут записи ответа

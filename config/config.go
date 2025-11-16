@@ -5,6 +5,7 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -15,7 +16,7 @@ func InitConnString(pathConfig string) string {
 	dir, file := filepath.Split(pathConfig)
 	fileName := strings.Split(file, ".")[0]
 
-	// Значения по умолчанию
+	// значения по умолчанию
 	viper.SetDefault("db.DB", "postgres")
 	viper.SetDefault("db.User", "postgres")
 	viper.SetDefault("db.Password", "epas")
@@ -27,18 +28,18 @@ func InitConnString(pathConfig string) string {
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(dir)
 
-	// Чтение конфигурации
+	// чтение конфигурации
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
-			log.Println("⚠️ Configuration file not found, using default parameters")
+			log.Println("configuration file not found, using default parameters")
 		} else {
-			log.Fatalf("❌ Fatal error reading config file: %v", err)
+			log.Fatalf("fatal error reading config file: %v", err)
 		}
 	} else {
-		log.Printf("✅ Loaded configuration from %s\n", pathConfig)
+		log.Printf("configuration loaded from %s", pathConfig)
 	}
 
-	// Формирование строки подключения
+	// формирование строки подключения
 	connString := fmt.Sprintf(
 		"postgres://%s:%s@%s:%d/%s?sslmode=disable&pool_max_conns=%d",
 		viper.GetString("db.User"),
@@ -50,4 +51,20 @@ func InitConnString(pathConfig string) string {
 	)
 
 	return connString
+}
+
+// ServerConfig хранит параметры конфигурации HTTP-сервера.
+type ServerConfig struct {
+	Port         string
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+}
+
+// InitServerConfig читает конфиг сервера из YAML
+func InitServerConfig() ServerConfig {
+	return ServerConfig{
+		Port:         viper.GetString("server.Port"),
+		ReadTimeout:  viper.GetDuration("server.ReadTimeout"),
+		WriteTimeout: viper.GetDuration("server.WriteTimeout"),
+	}
 }

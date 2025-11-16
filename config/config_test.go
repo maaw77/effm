@@ -7,7 +7,7 @@ import (
 )
 
 func TestInitConnString_Defaults(t *testing.T) {
-	expected := "postgres://postgres:crmpassword@localhost:5433/postgres?sslmode=disable&pool_max_conns=10"
+	expected := "postgres://postgres:epas@localhost:5433/postgres?sslmode=disable&pool_max_conns=10"
 
 	connString := InitConnString("")
 	if connString != expected {
@@ -21,16 +21,14 @@ func TestInitConnString_File(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Абсолютный путь к файлу config.yaml
 	configPath := filepath.Join(currDir, "config.yaml")
 
-	// Проверяем, что файл существует
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		t.Skipf("config.yaml not found at %s, skipping test", configPath)
 	}
 
-	// Подставь реальные значения из твоего config.yaml
-	expected := "postgres://postgres:epas@db:5433/postgres?sslmode=disable&pool_max_conns=7"
+	// Подставляем значения из твоего config.yaml
+	expected := "postgres://postgres:epas@localhost:5433/postgres?sslmode=disable&pool_max_conns=10"
 
 	connString := InitConnString(configPath)
 	if connString != expected {
