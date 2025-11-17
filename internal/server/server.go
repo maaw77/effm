@@ -60,6 +60,7 @@ func (s *Server) registerRoutes() {
 		api.PUT("/subscriptions/:id", s.updateSubscriptionHandler)
 		api.DELETE("/subscriptions/:id", s.deleteSubscriptionHandler)
 		api.GET("/subscriptions", s.listSubscriptionsHandler)
+		api.GET("/subscriptions/total", s.sumSubscriptionsHandler)
 	}
 }
 
@@ -278,6 +279,52 @@ func (s *Server) listSubscriptionsHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, resp)
+}
+
+// sumSubscriptionsHandler возвращает суммарную стоимость подписок за период.
+// GET /api/subscriptions/total?start=MM-YYYY&end=MM-YYYY&user_id=...&service=...
+func (s *Server) sumSubscriptionsHandler(c *gin.Context) {
+	var req dto.TotalCostRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid query parameters", "details": err.Error()})
+		return
+	}
+
+	// парсим даты MM-YYYY -> time.Time (начало месяца)
+	start, err := parseMonthYear(req.Start)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start format, expected MM-YYYY"})
+		return
+	}
+	// end: используем конец месяца — чтобы включить весь месяц
+	endMonth, err := parseMonthYear(req.End)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end format, expected MM-YYYY"})
+		return
+	}
+	// end should be end of month (set to last day 23:59:59)
+	end := endMonth.AddDate(0, 1, 0).Add(-time.Nanosecond)
+
+	var userID, serviceName string
+	if req.UserID != nil {
+		userID = *req.UserID
+	}
+	if req.ServiceName != nil {
+		serviceName = *req.ServiceName
+	}
+
+	// context with timeout
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	total, err := s.DB.SumSubscriptionsCost(ctx, userID, serviceName, start, end)
+	if err != nil {
+		// если DB возвращает ошибку — 500
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.TotalCostResponse{Total: total})
 }
 
 // --- вспомогательные функции ---
