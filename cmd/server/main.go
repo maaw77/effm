@@ -1,11 +1,21 @@
 // Package main запускает HTTP-сервер для работы с подписками.
 // Сервер использует Gin и подключается к PostgreSQL через internal/database.
 // Конфигурация читается из config/config.yaml.
+
+// cmd/server/main.go
+// Точка входа в приложение.
+// Использует реальный config-пакет с InitConnString и InitServerConfig.
+
+// cmd/server/main.go
+// Точка входа в приложение.
+// Полностью совместима с твоим текущим database.Close() → void
+
 package main
 
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -17,38 +27,59 @@ import (
 )
 
 func main() {
-	// настройка логирования: дата, время, короткий путь к файлу
-	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
-
-	// загрузка конфигурации базы данных и сервера
-	ctx := context.Background()
+	// Инициализируем конфигурацию из config/config.yaml
+	// Если файла нет — используются значения по умолчанию
 	connStr := config.InitConnString("config/config.yaml")
 	serverCfg := config.InitServerConfig()
 
-	// подключение к базе данных
-	db, err := database.NewSubscriptionDatabase(ctx, connStr)
+	log.Printf("server will listen on :%s", serverCfg.Port)
+
+	// Подключаемся к PostgreSQL
+	db, err := database.NewSubscriptionDatabase(context.Background(), connStr)
 	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
+		log.Fatalf("failed to connect to PostgreSQL: %v", err)
 	}
+
+	// При завершении процесса корректно закрываем пул соединений
+
 	defer db.Close()
 
-	// создание сервера с конфигурацией
-	srv := server.NewServer(db, serverCfg)
+	// Создаём HTTP-сервер на базе Gin
+	srv := server.NewServer(db)
 
-	// запуск сервера в отдельной горутине
+	// Оборачиваем Gin-роутер в net/http.Server
+
+	httpServer := &http.Server{
+		Addr:         ":" + serverCfg.Port,
+		Handler:      srv.Router,
+		ReadTimeout:  serverCfg.ReadTimeout,
+		WriteTimeout: serverCfg.WriteTimeout,
+	}
+
+	// Запускаем сервер в отдельной горутине
 	go func() {
-		if err := srv.Run(); err != nil {
-			log.Fatalf("server exited with error: %v", err)
+		log.Printf("server started at http://localhost:%s", serverCfg.Port)
+		log.Printf("API docs: http://localhost:%s/swagger/index.html (если swag включён)", serverCfg.Port)
+
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
 		}
 	}()
 
-	// ожидание сигнала завершения (graceful shutdown)
+	// Ожидаем сигнал завершения работы (Ctrl+C)
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Println("received shutdown signal, stopping server...")
 
-	// плавное завершение работы сервера (опционально)
-	time.Sleep(1 * time.Second)
-	log.Println("server stopped successfully")
+	log.Println("shutdown signal received, stopping server...")
+
+	// Даём активным запросам до 10 секунд на завершение
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := httpServer.Shutdown(ctx); err != nil {
+		log.Printf("server forced to shutdown: %v", err)
+	} else {
+		log.Println("server stopped gracefully")
+	}
 }
