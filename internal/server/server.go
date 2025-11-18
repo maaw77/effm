@@ -1,91 +1,128 @@
-// Package server реализует HTTP-сервер для работы с подписками.
-// Сервер использует Gin и предоставляет REST API для CRUD операций с подписками.
-// Подключение к базе данных выполняется через internal/database.
-// Обработчики используют DTO из internal/dto и модель Subscription из internal/models.
+// Пакет server реализует HTTP-слой (REST API) приложения.
+// Используется фреймворк Gin. Все ручки работают с новой моделью данных:
+// одна запись = оплата подписки за конкретный месяц (year + month).
+
 package server
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"github.com/maaw77/effm/config"
 	"github.com/maaw77/effm/internal/database"
 	"github.com/maaw77/effm/internal/dto"
 	"github.com/maaw77/effm/internal/models"
 )
 
-// Server хранит объект Gin Engine и ссылку на базу данных.
+// Server — основной объект HTTP-сервера.
+// Содержит роутер Gin и подключение к базе данных.
 type Server struct {
-	DB     *database.SubscriptionDatabase
 	Router *gin.Engine
-	Cfg    config.ServerConfig
+	DB     *database.SubscriptionDatabase
 }
 
-// NewServer создаёт новый HTTP-сервер с настройками из config.ServerConfig и подключением к базе данных.
-func NewServer(db *database.SubscriptionDatabase, cfg config.ServerConfig) *Server {
-	r := gin.Default()
+// NewServer создаёт и настраивает новый экземпляр сервера.
+// Регистрирует все HTTP-ручки.
+func NewServer(db *database.SubscriptionDatabase) *Server {
 	s := &Server{
+		Router: gin.Default(),
 		DB:     db,
-		Router: r,
-		Cfg:    cfg,
 	}
-	s.registerRoutes()
+
+	// Группа API с префиксом /api
+	api := s.Router.Group("/api")
+	{
+		// CRUD операции
+		api.POST("/subscriptions", s.createSubscriptionHandler)
+		api.GET("/subscriptions", s.listSubscriptionsHandler)
+		api.GET("/subscriptions/:id", s.getSubscriptionHandler)
+		api.PUT("/subscriptions/:id", s.updateSubscriptionHandler)
+		api.DELETE("/subscriptions/:id", s.deleteSubscriptionHandler)
+
+		// Подсчёт общей стоимости
+		api.GET("/subscriptions/total", s.sumSubscriptionsHandler)
+	}
+
 	return s
 }
 
-// Run запускает HTTP-сервер с настройками таймаутов и порта.
-func (s *Server) Run() error {
-	log.Printf("server running on port %s", s.Cfg.Port)
-
-	httpServer := &http.Server{
-		Addr:         ":" + s.Cfg.Port,
-		Handler:      s.Router,
-		ReadTimeout:  s.Cfg.ReadTimeout,
-		WriteTimeout: s.Cfg.WriteTimeout,
+// parseYearMonth преобразует строку "2025-07" в год и месяц.
+// Возвращает ошибку, если формат неправильный или значения вне диапазона.
+func parseYearMonth(s string) (int, int, error) {
+	var year, month int
+	n, err := fmt.Sscanf(s, "%d-%02d", &year, &month)
+	if err != nil || n != 2 {
+		return 0, 0, fmt.Errorf("неверный формат даты: %s (ожидается YYYY-MM)", s)
 	}
-
-	return httpServer.ListenAndServe()
+	if month < 1 || month > 12 {
+		return 0, 0, fmt.Errorf("месяц должен быть от 01 до 12, получено: %02d", month)
+	}
+	if year < 2000 || year > 2100 {
+		return 0, 0, fmt.Errorf("год должен быть от 2000 до 2100, получено: %d", year)
+	}
+	return year, month, nil
 }
 
-// registerRoutes регистрирует маршруты для API подписок.
-func (s *Server) registerRoutes() {
-	api := s.Router.Group("/api")
-	{
-		api.GET("/subscriptions/:id", s.getSubscriptionHandler)
-		api.POST("/subscriptions", s.createSubscriptionHandler)
-		api.PUT("/subscriptions/:id", s.updateSubscriptionHandler)
-		api.DELETE("/subscriptions/:id", s.deleteSubscriptionHandler)
-		api.GET("/subscriptions", s.listSubscriptionsHandler)
-		api.GET("/subscriptions/total", s.sumSubscriptionsHandler)
+// createSubscriptionHandler — POST /api/subscriptions
+// Создаёт новую запись о подписке за указанный месяц.
+func (s *Server) createSubscriptionHandler(c *gin.Context) {
+	var req dto.CreateSubscriptionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "некорректное тело запроса", "details": err.Error()})
+		return
 	}
-}
 
-// getSubscriptionHandler возвращает подписку по ID.
-// GET /api/subscriptions/:id
-// Параметры:
-//   - id (path) : UUID подписки
-//
-// Ответ:
-//   - 200 OK : SubscriptionResponse
-//   - 404 Not Found : если подписка не найдена
-//   - 500 Internal Server Error : при ошибке сервера
-func (s *Server) getSubscriptionHandler(c *gin.Context) {
-	id := c.Param("id")
+	year, month, err := parseYearMonth(req.YearMonth)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	sub := models.Subscription{
+		ServiceName: req.ServiceName,
+		Price:       req.Price,
+		UserID:      req.UserID,
+		Year:        year,
+		Month:       month,
+	}
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	sub, err := s.DB.GetSubscription(ctx, id)
+	id, err := s.DB.Create(ctx, sub)
 	if err != nil {
-		if err == database.ErrNotExist {
-			c.JSON(http.StatusNotFound, gin.H{"error": "subscription not found"})
+		if err == database.ErrConflict {
+			c.JSON(http.StatusConflict, gin.H{"error": "подписка на этот сервис за указанный месяц уже существует"})
 			return
 		}
-		log.Printf("error getting subscription: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		log.Printf("ошибка создания подписки: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		return
+	}
+
+	log.Printf("подписка успешно создана | id=%s | %s | %d-%02d | %d₽", id, req.ServiceName, year, month, req.Price)
+	c.JSON(http.StatusCreated, gin.H{"id": id})
+}
+
+// getSubscriptionHandler — GET /api/subscriptions/:id
+// Возвращает одну подписку по её UUID.
+func (s *Server) getSubscriptionHandler(c *gin.Context) {
+	id := c.Param("id")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	sub, err := s.DB.Get(ctx, id)
+	if err != nil {
+		if err == database.ErrNotExist {
+			c.JSON(http.StatusNotFound, gin.H{"error": "подписка не найдена"})
+			return
+		}
+		log.Printf("ошибка получения подписки id=%s: %v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
 		return
 	}
 
@@ -94,172 +131,83 @@ func (s *Server) getSubscriptionHandler(c *gin.Context) {
 		ServiceName: sub.ServiceName,
 		Price:       sub.Price,
 		UserID:      sub.UserID,
-		StartDate:   sub.StartDate.Format("01-2006"),
-		EndDate:     formatTimePtr(sub.EndDate),
+		YearMonth:   fmt.Sprintf("%d-%02d", sub.Year, sub.Month),
 		CreatedAt:   sub.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:   sub.UpdatedAt.Format(time.RFC3339),
-		Status:      "active",
 	}
+
 	c.JSON(http.StatusOK, resp)
 }
 
-// createSubscriptionHandler создаёт новую подписку.
-// POST /api/subscriptions
-// Тело запроса: CreateSubscriptionRequest
-// Ответ:
-//   - 201 Created : { "id": <UUID> }
-//   - 400 Bad Request : некорректное тело запроса
-//   - 409 Conflict : если подписка уже существует
-//   - 500 Internal Server Error : ошибка сервера
-func (s *Server) createSubscriptionHandler(c *gin.Context) {
-	var req dto.CreateSubscriptionRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
-	}
-
-	userID := req.UserID
-	if userID == "" {
-		userID = uuid.New().String()
-	}
-
-	start, err := parseMonthYear(req.StartDate)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start_date format"})
-		return
-	}
-
-	var endPtr *time.Time
-	if req.EndDate != nil {
-		end, err := parseMonthYear(*req.EndDate)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end_date format"})
-			return
-		}
-		endPtr = &end
-	}
-
-	sub := models.Subscription{
-		ServiceName: req.ServiceName,
-		Price:       req.Price,
-		UserID:      userID,
-		StartDate:   start,
-		EndDate:     endPtr,
-	}
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
-	defer cancel()
-
-	id, err := s.DB.CreateIfNotExist(ctx, sub)
-	if err != nil {
-		if err == database.ErrExist {
-			c.JSON(http.StatusConflict, gin.H{"error": "subscription already exists"})
-			return
-		}
-		log.Printf("error creating subscription: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
-		return
-	}
-	c.JSON(http.StatusCreated, gin.H{"id": id})
-}
-
-// updateSubscriptionHandler обновляет подписку по ID.
-// PUT /api/subscriptions/:id
-// Тело запроса: UpdateSubscriptionRequest
-// Ответ:
-//   - 200 OK : { "status": "updated" }
-//   - 404 Not Found : если подписка не найдена
-//   - 400 Bad Request : некорректное тело запроса
-//   - 500 Internal Server Error : ошибка сервера
+// updateSubscriptionHandler — PUT /api/subscriptions/:id
+// Обновляет название сервиса и/или цену существующей подписки.
 func (s *Server) updateSubscriptionHandler(c *gin.Context) {
 	id := c.Param("id")
 	var req dto.UpdateSubscriptionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "некорректное тело запроса"})
 		return
 	}
 
-	sub := models.Subscription{}
+	updates := models.Subscription{}
 	if req.ServiceName != nil {
-		sub.ServiceName = *req.ServiceName
+		updates.ServiceName = *req.ServiceName
 	}
 	if req.Price != nil {
-		sub.Price = *req.Price
-	}
-	if req.StartDate != nil {
-		start, err := parseMonthYear(*req.StartDate)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start_date format"})
-			return
-		}
-		sub.StartDate = start
-	}
-	if req.EndDate != nil {
-		end, err := parseMonthYear(*req.EndDate)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end_date format"})
-			return
-		}
-		sub.EndDate = &end
+		updates.Price = *req.Price
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	err := s.DB.UpdateSubscription(ctx, id, sub)
-	if err != nil {
+	if err := s.DB.Update(ctx, id, updates); err != nil {
 		if err == database.ErrNotExist {
-			c.JSON(http.StatusNotFound, gin.H{"error": "subscription not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "подписка не найдена"})
 			return
 		}
-		log.Printf("error updating subscription: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		log.Printf("ошибка обновления подписки id=%s: %v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
 		return
 	}
+
+	log.Printf("подписка успешно обновлена | id=%s", id)
 	c.JSON(http.StatusOK, gin.H{"status": "updated"})
 }
 
-// deleteSubscriptionHandler удаляет подписку по ID.
-// DELETE /api/subscriptions/:id
-// Ответ:
-//   - 200 OK : { "status": "deleted" }
-//   - 404 Not Found : если подписка не найдена
-//   - 500 Internal Server Error : ошибка сервера
+// deleteSubscriptionHandler — DELETE /api/subscriptions/:id
+// Удаляет подписку по ID.
 func (s *Server) deleteSubscriptionHandler(c *gin.Context) {
 	id := c.Param("id")
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	err := s.DB.DeleteSubscription(ctx, id)
-	if err != nil {
+	if err := s.DB.Delete(ctx, id); err != nil {
 		if err == database.ErrNotExist {
-			c.JSON(http.StatusNotFound, gin.H{"error": "subscription not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "подписка не найдена"})
 			return
 		}
-		log.Printf("error deleting subscription: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		log.Printf("ошибка удаления подписки id=%s: %v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
 		return
 	}
+
+	log.Printf("подписка успешно удалена | id=%s", id)
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
 }
 
-// listSubscriptionsHandler возвращает список подписок.
-// GET /api/subscriptions?user_id=...
-// Параметры:
-//   - user_id (query, optional) : фильтрация по пользователю
-//
-// Ответ:
-//   - 200 OK : []SubscriptionResponse
-//   - 500 Internal Server Error : ошибка сервера
+// listSubscriptionsHandler — GET /api/subscriptions?user_id=...
+// Возвращает список всех подписок или только одного пользователя.
 func (s *Server) listSubscriptionsHandler(c *gin.Context) {
 	userID := c.Query("user_id")
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	subs, err := s.DB.ListSubscriptions(ctx, userID)
+	subs, err := s.DB.List(ctx, userID)
 	if err != nil {
-		log.Printf("error listing subscriptions: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		log.Printf("ошибка получения списка подписок: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
 		return
 	}
 
@@ -270,73 +218,57 @@ func (s *Server) listSubscriptionsHandler(c *gin.Context) {
 			ServiceName: sub.ServiceName,
 			Price:       sub.Price,
 			UserID:      sub.UserID,
-			StartDate:   sub.StartDate.Format("01-2006"),
-			EndDate:     formatTimePtr(sub.EndDate),
+			YearMonth:   fmt.Sprintf("%d-%02d", sub.Year, sub.Month),
 			CreatedAt:   sub.CreatedAt.Format(time.RFC3339),
 			UpdatedAt:   sub.UpdatedAt.Format(time.RFC3339),
-			Status:      "active",
 		})
 	}
 
 	c.JSON(http.StatusOK, resp)
 }
 
-// sumSubscriptionsHandler возвращает суммарную стоимость подписок за период.
-// GET /api/subscriptions/total?start=MM-YYYY&end=MM-YYYY&user_id=...&service=...
+// sumSubscriptionsHandler — GET /api/subscriptions/total
+// Подсчитывает общую стоимость всех подписок за указанный период.
+// Поддерживает фильтры по пользователю и сервису.
 func (s *Server) sumSubscriptionsHandler(c *gin.Context) {
 	var req dto.TotalCostRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid query parameters", "details": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "некорректные параметры запроса", "details": err.Error()})
 		return
 	}
 
-	// парсим даты MM-YYYY -> time.Time (начало месяца)
-	start, err := parseMonthYear(req.Start)
+	startYear, startMonth, err := parseYearMonth(req.Start)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start format, expected MM-YYYY"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "неверный формат параметра start: " + err.Error()})
 		return
 	}
-	// end: используем конец месяца — чтобы включить весь месяц
-	endMonth, err := parseMonthYear(req.End)
+	endYear, endMonth, err := parseYearMonth(req.End)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end format, expected MM-YYYY"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "неверный формат параметра end: " + err.Error()})
 		return
 	}
-	// end should be end of month (set to last day 23:59:59)
-	end := endMonth.AddDate(0, 1, 0).Add(-time.Nanosecond)
 
-	var userID, serviceName string
+	userID := ""
 	if req.UserID != nil {
 		userID = *req.UserID
 	}
-	if req.ServiceName != nil {
-		serviceName = *req.ServiceName
+	service := ""
+	if req.Service != nil {
+		service = *req.Service
 	}
 
-	// context with timeout
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	total, err := s.DB.SumSubscriptionsCost(ctx, userID, serviceName, start, end)
+	total, err := s.DB.SumSubscriptionsCost(ctx, userID, service, startYear, startMonth, endYear, endMonth)
 	if err != nil {
-		// если DB возвращает ошибку — 500
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		log.Printf("ошибка подсчёта общей стоимости: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
 		return
 	}
 
+	log.Printf("подсчёт общей стоимости завершён | период=%s..%s | пользователь=%s | сервис=%s | итог=%d₽",
+		req.Start, req.End, userID, service, total)
+
 	c.JSON(http.StatusOK, dto.TotalCostResponse{Total: total})
-}
-
-// --- вспомогательные функции ---
-
-func parseMonthYear(s string) (time.Time, error) {
-	return time.Parse("01-2006", s)
-}
-
-func formatTimePtr(t *time.Time) *string {
-	if t == nil {
-		return nil
-	}
-	str := t.Format("01-2006")
-	return &str
 }
