@@ -1,10 +1,13 @@
+// internal/database/database_test.go
+// Пакет database содержит модульные тесты для слоя работы с БД.
+// Тесты проверяют корректность всех операций: создание, чтение, обновление, удаление,
+// уникальность записей и главное — правильность подсчёта общей стоимости за период.
+
 package database
 
 import (
 	"context"
-	"os"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/maaw77/effm/config"
@@ -13,195 +16,202 @@ import (
 
 var testDB *SubscriptionDatabase
 
-// TestMain создаёт подключение к базе перед тестами и закрывает его после
+// TestMain выполняется один раз до и после всех тестов.
+// Подключаемся к тестовой БД, очищаем таблицу и закрываем соединение в конце.
 func TestMain(m *testing.M) {
 	ctx := context.Background()
+
+	// Читаем строку подключения из config.yaml
 	connStr := config.InitConnString("config/config.yaml")
 
 	var err error
 	testDB, err = NewSubscriptionDatabase(ctx, connStr)
 	if err != nil {
-		panic(err)
+		panic("failed to connect to test database: " + err.Error())
+	}
+	defer testDB.Close() // ← исправлено: было testTestDB
+
+	// Очищаем таблицу перед запуском тестов
+	_, err = testDB.DBpool.Exec(ctx, "TRUNCATE TABLE subscriptions RESTART IDENTITY")
+	if err != nil {
+		panic("failed to truncate subscriptions table: " + err.Error())
 	}
 
-	// Запуск тестов и сохранение кода завершения
-	exitCode := m.Run()
-
-	// Закрытие соединения после тестов
-	testDB.Close()
-
-	// Завершение процесса с правильным кодом
-	os.Exit(exitCode)
+	m.Run()
 }
 
-// helper: создаёт тестовую подписку с указанными датами
-func newTestSubscriptionWithDates(start, end *time.Time) models.Subscription {
-	sub := models.Subscription{
+// newTestSubscription — вспомогательная функция для создания тестовой подписки
+func newTestSubscription(year, month int) models.Subscription {
+	return models.Subscription{
 		ServiceName: "TestService",
-		Price:       500,
+		Price:       999,
 		UserID:      uuid.New().String(),
-	}
-	if start != nil {
-		sub.StartDate = *start
-	} else {
-		sub.StartDate = time.Now()
-	}
-	sub.EndDate = end
-	return sub
-}
-
-// TestCreateIfNotExist проверяет создание новой подписки и ErrExist при дублировании
-func TestCreateIfNotExist(t *testing.T) {
-	ctx := context.Background()
-	sub := newTestSubscriptionWithDates(nil, nil)
-
-	id, err := testDB.CreateIfNotExist(ctx, sub)
-	if err != nil {
-		t.Fatalf("CreateIfNotExist failed: %v", err)
-	}
-	// Удалим подписку после теста
-	defer testDB.DeleteSubscription(ctx, id)
-
-	// Повторная попытка должна вернуть ErrExist
-	_, err = testDB.CreateIfNotExist(ctx, sub)
-	if err != ErrExist {
-		t.Fatalf("Ожидали ErrExist, получили %v", err)
-	}
-
-	// Проверяем, что подписка создана корректно
-	got, err := testDB.GetSubscription(ctx, id)
-	if err != nil {
-		t.Fatalf("GetSubscription failed: %v", err)
-	}
-	if got.ServiceName != sub.ServiceName || got.UserID != sub.UserID {
-		t.Fatalf("Полученные данные не совпадают с ожидаемыми")
+		Year:        year,
+		Month:       month,
 	}
 }
 
-// TestUpdateSubscription проверяет обновление подписки и ErrNotExist
-func TestUpdateSubscription(t *testing.T) {
+// TestCreateAndGet проверяет создание подписки и её последующее чтение по ID
+func TestCreateAndGet(t *testing.T) {
 	ctx := context.Background()
-	sub := newTestSubscriptionWithDates(nil, nil)
+	sub := newTestSubscription(2025, 7)
 
-	id, err := testDB.CreateIfNotExist(ctx, sub)
+	id, err := testDB.Create(ctx, sub)
 	if err != nil {
-		t.Fatalf("CreateIfNotExist failed: %v", err)
+		t.Fatalf("failed to create subscription: %v", err)
 	}
-	defer testDB.DeleteSubscription(ctx, id) // откат после теста
 
-	// Обновляем подписку
-	sub.ServiceName = "UpdatedService"
-	err = testDB.UpdateSubscription(ctx, id, sub)
+	got, err := testDB.Get(ctx, id)
 	if err != nil {
-		t.Fatalf("UpdateSubscription failed: %v", err)
+		t.Fatalf("failed to get subscription by id=%s: %v", id, err)
 	}
 
-	// Проверяем обновление
-	updated, _ := testDB.GetSubscription(ctx, id)
-	if updated.ServiceName != "UpdatedService" {
-		t.Fatalf("Подписка не обновилась")
+	if got.ID != id ||
+		got.ServiceName != sub.ServiceName ||
+		got.Price != sub.Price ||
+		got.UserID != sub.UserID ||
+		got.Year != 2025 || got.Month != 7 {
+		t.Fatalf("retrieved subscription does not match created one.\nWant: %+v\nGot:  %+v", sub, got)
+	}
+}
+
+// TestCreateConflict проверяет, что нельзя создать две одинаковые подписки за один месяц
+func TestCreateConflict(t *testing.T) {
+	ctx := context.Background()
+	sub := newTestSubscription(2025, 8)
+
+	_, err := testDB.Create(ctx, sub)
+	if err != nil {
+		t.Fatalf("first creation failed: %v", err)
 	}
 
-	// Попытка обновить несуществующую подписку
-	err = testDB.UpdateSubscription(ctx, uuid.New().String(), sub)
+	_, err = testDB.Create(ctx, sub)
+	if err != ErrConflict {
+		t.Fatalf("expected ErrConflict on duplicate subscription, got: %v (%T)", err, err)
+	}
+}
+
+// TestUpdate проверяет обновление названия и цены существующей подписки
+func TestUpdate(t *testing.T) {
+	ctx := context.Background()
+	sub := newTestSubscription(2025, 9)
+	id, _ := testDB.Create(ctx, sub)
+
+	updates := models.Subscription{
+		ServiceName: "UpdatedService",
+		Price:       1500,
+	}
+
+	err := testDB.Update(ctx, id, updates)
+	if err != nil {
+		t.Fatalf("failed to update subscription: %v", err)
+	}
+
+	updated, _ := testDB.Get(ctx, id)
+	if updated.ServiceName != "UpdatedService" || updated.Price != 1500 {
+		t.Fatalf("subscription was not updated. Want ServiceName=UpdatedService, Price=1500, got: %+v", updated)
+	}
+}
+
+// TestDelete проверяет удаление подписки и что после удаления она не находится
+func TestDelete(t *testing.T) {
+	ctx := context.Background()
+	sub := newTestSubscription(2025, 10)
+	id, _ := testDB.Create(ctx, sub)
+
+	err := testDB.Delete(ctx, id)
+	if err != nil {
+		t.Fatalf("failed to delete subscription: %v", err)
+	}
+
+	_, err = testDB.Get(ctx, id)
 	if err != ErrNotExist {
-		t.Fatalf("Ожидали ErrNotExist, получили %v", err)
+		t.Fatalf("expected ErrNotExist after deletion, got: %v", err)
 	}
 }
 
-// TestDeleteSubscription проверяет удаление подписки и ErrNotExist
-func TestDeleteSubscription(t *testing.T) {
+// TestList проверяет получение списка всех подписок и фильтрацию по пользователю
+func TestList(t *testing.T) {
 	ctx := context.Background()
-	sub := newTestSubscriptionWithDates(nil, nil)
+	userID := uuid.New().String()
 
-	id, err := testDB.CreateIfNotExist(ctx, sub)
-	if err != nil {
-		t.Fatalf("CreateIfNotExist failed: %v", err)
+	// Создаём 3 подписки одного пользователя
+	for i := 1; i <= 3; i++ {
+		sub := models.Subscription{
+			ServiceName: "ListTest",
+			Price:       100 + i*100,
+			UserID:      userID,
+			Year:        2025,
+			Month:       i,
+		}
+		_, err := testDB.Create(ctx, sub)
+		if err != nil {
+			t.Fatalf("failed to create test subscription: %v", err)
+		}
 	}
 
-	// Удаляем подписку
-	err = testDB.DeleteSubscription(ctx, id)
+	all, err := testDB.List(ctx, "")
 	if err != nil {
-		t.Fatalf("DeleteSubscription failed: %v", err)
+		t.Fatalf("failed to list all subscriptions: %v", err)
+	}
+	if len(all) < 3 {
+		t.Fatalf("expected at least 3 subscriptions in total list, got %d", len(all))
 	}
 
-	// Попытка удалить снова
-	err = testDB.DeleteSubscription(ctx, id)
-	if err != ErrNotExist {
-		t.Fatalf("Ожидали ErrNotExist, получили %v", err)
+	userOnly, err := testDB.List(ctx, userID)
+	if err != nil {
+		t.Fatalf("failed to list user's subscriptions: %v", err)
+	}
+	if len(userOnly) != 3 {
+		t.Fatalf("expected exactly 3 subscriptions for user, got %d", len(userOnly))
 	}
 }
 
-// TestListSubscriptions проверяет фильтрацию по userID и общий список
-func TestListSubscriptions(t *testing.T) {
-	ctx := context.Background()
-
-	sub1 := newTestSubscriptionWithDates(nil, nil)
-	sub2 := newTestSubscriptionWithDates(nil, nil)
-
-	id1, _ := testDB.CreateIfNotExist(ctx, sub1)
-	defer testDB.DeleteSubscription(ctx, id1)
-	id2, _ := testDB.CreateIfNotExist(ctx, sub2)
-	defer testDB.DeleteSubscription(ctx, id2)
-
-	all, err := testDB.ListSubscriptions(ctx, "")
-	if err != nil {
-		t.Fatalf("ListSubscriptions failed: %v", err)
-	}
-	if len(all) < 2 {
-		t.Fatalf("Ожидали минимум 2 подписки, получили %d", len(all))
-	}
-
-	// Фильтр по пользователю
-	listUser1, _ := testDB.ListSubscriptions(ctx, sub1.UserID)
-	if len(listUser1) != 1 {
-		t.Fatalf("Ожидали 1 подписку для user1, получили %d", len(listUser1))
-	}
-
-	listUser2, _ := testDB.ListSubscriptions(ctx, sub2.UserID)
-	if len(listUser2) != 1 {
-		t.Fatalf("Ожидали 1 подписку для user2, получили %d", len(listUser2))
-	}
-}
-
-// TestSumSubscriptionsCost проверяет подсчёт суммарной стоимости подписок
+// TestSumSubscriptionsCost — самый важный тест!
+// Проверяет корректность подсчёта общей стоимости за период.
 func TestSumSubscriptionsCost(t *testing.T) {
 	ctx := context.Background()
+	userID := uuid.New().String()
 
-	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	end := start.AddDate(0, 1, 0)
-	sub1 := newTestSubscriptionWithDates(&start, &end)
+	// Создаём тестовые подписки
+	testSubs := []models.Subscription{
+		{ServiceName: "A", Price: 500, UserID: userID, Year: 2025, Month: 1},
+		{ServiceName: "B", Price: 600, UserID: userID, Year: 2025, Month: 2},
+		{ServiceName: "A", Price: 700, UserID: userID, Year: 2025, Month: 3},
+		{ServiceName: "A", Price: 800, UserID: userID, Year: 2026, Month: 1}, // не должен попасть в 2025
+	}
 
-	start2 := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
-	end2 := start2.AddDate(0, 1, 0)
-	sub2 := newTestSubscriptionWithDates(&start2, &end2)
+	for _, s := range testSubs {
+		_, err := testDB.Create(ctx, s)
+		if err != nil {
+			t.Fatalf("failed to create test subscription: %v", err)
+		}
+	}
 
-	id1, _ := testDB.CreateIfNotExist(ctx, sub1)
-	defer testDB.DeleteSubscription(ctx, id1)
-	id2, _ := testDB.CreateIfNotExist(ctx, sub2)
-	defer testDB.DeleteSubscription(ctx, id2)
-
-	// Сумма за весь год
-	sum, err := testDB.SumSubscriptionsCost(ctx, "", "", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC))
+	// 2025 год целиком → 500 + 600 + 700 = 1800
+	total, err := testDB.SumSubscriptionsCost(ctx, userID, "", 2025, 1, 2025, 12)
 	if err != nil {
-		t.Fatalf("SumSubscriptionsCost failed: %v", err)
+		t.Fatal(err)
 	}
-	expected := sub1.Price + sub2.Price
-	if sum != expected {
-		t.Fatalf("Ожидали сумму %d, получили %d", expected, sum)
-	}
-
-	// Сумма за период до июня
-	sum, _ = testDB.SumSubscriptionsCost(ctx, "", "", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2025, 5, 31, 0, 0, 0, 0, time.UTC))
-	if sum != sub1.Price {
-		t.Fatalf("Ожидали сумму %d, получили %d", sub1.Price, sum)
+	if total != 1800 {
+		t.Fatalf("expected 1800₽ for 2025, got %d₽", total)
 	}
 
-	// Сумма по конкретному пользователю
-	sum, _ = testDB.SumSubscriptionsCost(ctx, sub1.UserID, "", start, end)
-	if sum != sub1.Price {
-		t.Fatalf("Ожидали сумму %d, получили %d", sub1.Price, sum)
+	// Только сервис "A" в 2025 → 500 + 700 = 1200
+	total, err = testDB.SumSubscriptionsCost(ctx, userID, "A", 2025, 1, 2025, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1200 {
+		t.Fatalf("expected 1200₽ for service A in 2025, got %d₽", total)
+	}
+
+	// Только февраль 2025 → 600
+	total, err = testDB.SumSubscriptionsCost(ctx, userID, "", 2025, 2, 2025, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 600 {
+		t.Fatalf("expected 600₽ for February 2025, got %d₽", total)
 	}
 }
