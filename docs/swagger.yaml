@@ -1,0 +1,320 @@
+definitions:
+  github_com_maaw77_effm_internal_dto.CreateSubscriptionRequest:
+    description: Данные для создания записи об оплате подписки. Дата в формате YYYY-MM
+      (например, 2025-07)
+    properties:
+      price:
+        description: Стоимость за месяц в рублях
+        example: 499
+        type: integer
+      service_name:
+        description: Название сервиса
+        example: Yandex Plus
+        type: string
+      user_id:
+        description: UUID пользователя
+        example: f47ac10b-58cc-4372-a567-0e02b2c3d479
+        type: string
+      year_month:
+        description: Год и месяц в формате YYYY-MM
+        example: 2025-07
+        type: string
+    required:
+    - price
+    - service_name
+    - user_id
+    - year_month
+    type: object
+  github_com_maaw77_effm_internal_dto.SubscriptionResponse:
+    description: Полная информация о записи подписки с датой создания/обновления
+    properties:
+      created_at:
+        description: Время создания
+        example: "2025-07-15T10:23:45Z"
+        type: string
+      id:
+        description: UUID записи
+        example: f47ac10b-58cc-4372-a567-0e02b2c3d479
+        type: string
+      price:
+        description: Стоимость за месяц
+        example: 499
+        type: integer
+      service_name:
+        description: Название сервиса
+        example: Yandex Plus
+        type: string
+      updated_at:
+        description: Время последнего обновления
+        example: "2025-07-15T10:23:45Z"
+        type: string
+      user_id:
+        description: UUID пользователя
+        example: f47ac10b-58cc-4372-a567-0e02b2c3d479
+        type: string
+      year_month:
+        description: Год и месяц в формате YYYY-MM
+        example: 2025-07
+        type: string
+    type: object
+  github_com_maaw77_effm_internal_dto.TotalCostResponse:
+    description: Суммарная стоимость всех подходящих подписок за выбранный период
+    properties:
+      total:
+        description: Итоговая сумма в рублях
+        example: 8599
+        type: integer
+    type: object
+  github_com_maaw77_effm_internal_dto.UpdateSubscriptionRequest:
+    description: Можно обновить название сервиса и/или цену. Поля опциональные
+    properties:
+      price:
+        description: Новая цена (если 0 — будет проигнорировано)
+        example: 599
+        type: integer
+      service_name:
+        description: Новое название сервиса
+        example: Yandex Plus Premium
+        type: string
+    type: object
+info:
+  contact: {}
+paths:
+  /subscriptions:
+    get:
+      description: Если передать user_id — вернёт только подписки этого пользователя
+      parameters:
+      - description: UUID пользователя для фильтрации
+        in: query
+        name: user_id
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/github_com_maaw77_effm_internal_dto.SubscriptionResponse'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Список всех подписок
+      tags:
+      - subscriptions
+    post:
+      consumes:
+      - application/json
+      description: Одна запись = оплата за один месяц. Дубли по пользователю + сервису
+        + месяцу запрещены
+      parameters:
+      - description: Данные подписки
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/github_com_maaw77_effm_internal_dto.CreateSubscriptionRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: UUID созданной записи
+          schema:
+            additionalProperties:
+              allOf:
+              - type: string
+              - properties:
+                  id:
+                    type: string
+                type: object
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: подписка уже существует
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Создать запись о подписке за конкретный месяц
+      tags:
+      - subscriptions
+  /subscriptions/{id}:
+    delete:
+      parameters:
+      - description: UUID подписки
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              allOf:
+              - type: string
+              - properties:
+                  status:
+                    type: string
+                type: object
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Удалить подписку
+      tags:
+      - subscriptions
+    get:
+      parameters:
+      - description: UUID подписки
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_maaw77_effm_internal_dto.SubscriptionResponse'
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Получить подписку по ID
+      tags:
+      - subscriptions
+    put:
+      consumes:
+      - application/json
+      description: Можно менять только название сервиса и/или цену. Месяц и год —
+        неизменяемые
+      parameters:
+      - description: UUID подписки
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Поля для обновления
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/github_com_maaw77_effm_internal_dto.UpdateSubscriptionRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              allOf:
+              - type: string
+              - properties:
+                  status:
+                    type: string
+                type: object
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Частично обновить подписку
+      tags:
+      - subscriptions
+  /subscriptions/total:
+    get:
+      description: Период задаётся включительно. Поддерживает фильтры по пользователю
+        и сервису
+      parameters:
+      - description: Начало периода (YYYY-MM)
+        example: 2025-01
+        in: query
+        name: start
+        required: true
+        type: string
+      - description: Конец периода (YYYY-MM)
+        example: 2025-12
+        in: query
+        name: end
+        required: true
+        type: string
+      - description: UUID пользователя
+        example: f47ac10b-58cc-4372-a567-0e02b2c3d479
+        in: query
+        name: user_id
+        type: string
+      - description: Название сервиса
+        in: query
+        name: service
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_maaw77_effm_internal_dto.TotalCostResponse'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Подсчёт общей стоимости подписок за период
+      tags:
+      - subscriptions
+swagger: "2.0"

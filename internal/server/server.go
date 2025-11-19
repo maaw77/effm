@@ -17,40 +17,42 @@ import (
 	"github.com/maaw77/effm/internal/models"
 )
 
-// Server — основной объект HTTP-сервера.
-// Содержит роутер Gin и подключение к базе данных.
+// Server — основной объект HTTP-сервера
 type Server struct {
 	Router *gin.Engine
 	DB     *database.SubscriptionDatabase
 }
 
-// NewServer создаёт и настраивает новый экземпляр сервера.
-// Регистрирует все HTTP-ручки.
+// NewServer создаёт и настраивает сервер со всеми роутами
+//
+//	@title           Subscriptions API
+//	@version         1.0
+//	@description     REST-сервис для агрегации данных об онлайн-подписках пользователей
+//	@contact.name    API Support
+//	@contact.email   support@example.com
+//	@license.name    MIT
+//	@host            localhost:8080
+//	@BasePath        /api
 func NewServer(db *database.SubscriptionDatabase) *Server {
 	s := &Server{
 		Router: gin.Default(),
 		DB:     db,
 	}
 
-	// Группа API с префиксом /api
 	api := s.Router.Group("/api")
 	{
-		// CRUD операции
 		api.POST("/subscriptions", s.createSubscriptionHandler)
 		api.GET("/subscriptions", s.listSubscriptionsHandler)
 		api.GET("/subscriptions/:id", s.getSubscriptionHandler)
 		api.PUT("/subscriptions/:id", s.updateSubscriptionHandler)
 		api.DELETE("/subscriptions/:id", s.deleteSubscriptionHandler)
-
-		// Подсчёт общей стоимости
 		api.GET("/subscriptions/total", s.sumSubscriptionsHandler)
 	}
 
 	return s
 }
 
-// parseYearMonth преобразует строку "2025-07" в год и месяц.
-// Возвращает ошибку, если формат неправильный или значения вне диапазона.
+// parseYearMonth преобразует строку "2025-07" в год и месяц с валидацией
 func parseYearMonth(s string) (int, int, error) {
 	var year, month int
 	n, err := fmt.Sscanf(s, "%d-%02d", &year, &month)
@@ -66,8 +68,18 @@ func parseYearMonth(s string) (int, int, error) {
 	return year, month, nil
 }
 
-// createSubscriptionHandler — POST /api/subscriptions
-// Создаёт новую запись о подписке за указанный месяц.
+// createSubscriptionHandler — создаёт запись об оплате подписки за конкретный месяц
+// @Summary      Создать запись о подписке за конкретный месяц
+// @Description  Одна запись = оплата за один месяц. Дубли по пользователю + сервису + месяцу запрещены
+// @Tags         subscriptions
+// @Accept       json
+// @Produce      json
+// @Param        request body     dto.CreateSubscriptionRequest true "Данные подписки"
+// @Success      201    {object} map[string]string{id=string} "UUID созданной записи"
+// @Failure      400    {object} map[string]string
+// @Failure      409    {object} map[string]string "подписка уже существует"
+// @Failure      500    {object} map[string]string
+// @Router       /subscriptions [post]
 func (s *Server) createSubscriptionHandler(c *gin.Context) {
 	var req dto.CreateSubscriptionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -107,8 +119,15 @@ func (s *Server) createSubscriptionHandler(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"id": id})
 }
 
-// getSubscriptionHandler — GET /api/subscriptions/:id
-// Возвращает одну подписку по её UUID.
+// getSubscriptionHandler — возвращает одну подписку по её UUID
+// @Summary      Получить подписку по ID
+// @Tags         subscriptions
+// @Produce      json
+// @Param        id  path     string true "UUID подписки"
+// @Success      200 {object} dto.SubscriptionResponse
+// @Failure      404 {object} map[string]string
+// @Failure      500 {object} map[string]string
+// @Router       /subscriptions/{id} [get]
 func (s *Server) getSubscriptionHandler(c *gin.Context) {
 	id := c.Param("id")
 
@@ -139,13 +158,23 @@ func (s *Server) getSubscriptionHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// updateSubscriptionHandler — PUT /api/subscriptions/:id
-// Обновляет название сервиса и/или цену существующей подписки.
+// updateSubscriptionHandler — частично обновляет подписку (только название и/или цену)
+// @Summary      Частично обновить подписку
+// @Description  Можно менять только название сервиса и/или цену. Месяц и год — неизменяемые
+// @Tags         subscriptions
+// @Accept       json
+// @Produce      json
+// @Param        id      path     string                        true  "UUID подписки"
+// @Param        request  body     dto.UpdateSubscriptionRequest true  "Поля для обновления"
+// @Success      200 {object} map[string]string{status=string}
+// @Failure      400,404,500 {object} map[string]string
+// @Router       /subscriptions/{id} [put]
 func (s *Server) updateSubscriptionHandler(c *gin.Context) {
 	id := c.Param("id")
+
 	var req dto.UpdateSubscriptionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "некорректное тело запроса"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "некорректное тело запроса", "details": err.Error()})
 		return
 	}
 
@@ -174,8 +203,13 @@ func (s *Server) updateSubscriptionHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "updated"})
 }
 
-// deleteSubscriptionHandler — DELETE /api/subscriptions/:id
-// Удаляет подписку по ID.
+// deleteSubscriptionHandler — удаляет подписку по UUID
+// @Summary      Удалить подписку
+// @Tags         subscriptions
+// @Param        id  path     string true "UUID подписки"
+// @Success      200 {object} map[string]string{status=string}
+// @Failure      404,500 {object} map[string]string
+// @Router       /subscriptions/{id} [delete]
 func (s *Server) deleteSubscriptionHandler(c *gin.Context) {
 	id := c.Param("id")
 
@@ -196,8 +230,15 @@ func (s *Server) deleteSubscriptionHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
 }
 
-// listSubscriptionsHandler — GET /api/subscriptions?user_id=...
-// Возвращает список всех подписок или только одного пользователя.
+// listSubscriptionsHandler — возвращает список всех подписок (с фильтром по пользователю)
+// @Summary      Список всех подписок
+// @Description  Если передать user_id — вернёт только подписки этого пользователя
+// @Tags         subscriptions
+// @Produce      json
+// @Param        user_id query string false "UUID пользователя для фильтрации"
+// @Success      200 {array} dto.SubscriptionResponse
+// @Failure      500 {object} map[string]string
+// @Router       /subscriptions [get]
 func (s *Server) listSubscriptionsHandler(c *gin.Context) {
 	userID := c.Query("user_id")
 
@@ -227,9 +268,18 @@ func (s *Server) listSubscriptionsHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// sumSubscriptionsHandler — GET /api/subscriptions/total
-// Подсчитывает общую стоимость всех подписок за указанный период.
-// Поддерживает фильтры по пользователю и сервису.
+// sumSubscriptionsHandler — считает суммарную стоимость подписок за период с фильтрами
+// @Summary      Подсчёт общей стоимости подписок за период
+// @Description  Период задаётся включительно. Поддерживает фильтры по пользователю и сервису
+// @Tags         subscriptions
+// @Produce      json
+// @Param        start   query string true "Начало периода (YYYY-MM)" example(2025-01)
+// @Param        end     query string true "Конец периода (YYYY-MM)" example(2025-12)
+// @Param        user_id query string false "UUID пользователя" example(f47ac10b-58cc-4372-a567-0e02b2c3d479)
+// @Param        service  query string false "Название сервиса"
+// @Success      200 {object} dto.TotalCostResponse
+// @Failure      400,500 {object} map[string]string
+// @Router       /subscriptions/total [get]
 func (s *Server) sumSubscriptionsHandler(c *gin.Context) {
 	var req dto.TotalCostRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
@@ -267,8 +317,6 @@ func (s *Server) sumSubscriptionsHandler(c *gin.Context) {
 		return
 	}
 
-	log.Printf("подсчёт общей стоимости завершён | период=%s..%s | пользователь=%s | сервис=%s | итог=%d₽",
-		req.Start, req.End, userID, service, total)
-
+	log.Printf("подсчёт общей стоимости | %s..%s | user=%s | service=%s | total=%d₽", req.Start, req.End, userID, service, total)
 	c.JSON(http.StatusOK, dto.TotalCostResponse{Total: total})
 }

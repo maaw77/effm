@@ -25,4 +25,5 @@ migr_ver: ### print current migration version
 	migrate -verbose -database ${POSTGRESQL_URL} -path ./migrations version
 PHONY: doc
 doc: ### create docs.go
-	~/go/bin/swag init -g internal/crm/crm.go
+	~/go/bin/swag init -g cmd/server/main.go --parseDependency --parseInternal --parseDepth 2
+

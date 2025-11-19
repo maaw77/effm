@@ -1,0 +1,41 @@
+2025/11/19 20:46:06 configuration loaded from config/config.yaml
+2025/11/19 20:46:06 server will listen on :8080
+2025/11/19 20:46:06 успешно подключено к PostgreSQL | pool_max_conns=10
+[GIN-debug] [WARNING] Creating an Engine instance with the Logger and Recovery middleware already attached.
+
+[GIN-debug] [WARNING] Running in "debug" mode. Switch to "release" mode in production.
+ - using env:	export GIN_MODE=release
+ - using code:	gin.SetMode(gin.ReleaseMode)
+
+[GIN-debug] POST   /api/subscriptions        --> github.com/maaw77/effm/internal/server.(*Server).createSubscriptionHandler-fm (3 handlers)
+[GIN-debug] GET    /api/subscriptions        --> github.com/maaw77/effm/internal/server.(*Server).listSubscriptionsHandler-fm (3 handlers)
+[GIN-debug] GET    /api/subscriptions/:id    --> github.com/maaw77/effm/internal/server.(*Server).getSubscriptionHandler-fm (3 handlers)
+[GIN-debug] PUT    /api/subscriptions/:id    --> github.com/maaw77/effm/internal/server.(*Server).updateSubscriptionHandler-fm (3 handlers)
+[GIN-debug] DELETE /api/subscriptions/:id    --> github.com/maaw77/effm/internal/server.(*Server).deleteSubscriptionHandler-fm (3 handlers)
+[GIN-debug] GET    /api/subscriptions/total  --> github.com/maaw77/effm/internal/server.(*Server).sumSubscriptionsHandler-fm (3 handlers)
+[GIN-debug] GET    /swagger/*any             --> github.com/swaggo/gin-swagger.CustomWrapHandler.func1 (3 handlers)
+2025/11/19 20:46:06 server started at http://localhost:8080
+2025/11/19 20:46:06 Swagger UI: http://localhost:8080/swagger/index.html
+[GIN] 2025/11/19 - 20:46:06 | 200 |     116.098µs |             ::1 | GET      "/swagger/index.html"
+2025/11/19 20:46:06 подписка успешно создана | id=5784021d-6205-4237-bab8-de9d87ca4d6c пользователь=0a5f9fb1-690b-491e-9b5c-b434deaff48f сервис=Yandex Plus год=2025 месяц=07 цена=499₽
+2025/11/19 20:46:06 подписка успешно создана | id=5784021d-6205-4237-bab8-de9d87ca4d6c | Yandex Plus | 2025-07 | 499₽
+[GIN] 2025/11/19 - 20:46:06 | 201 |   25.525501ms |             ::1 | POST     "/api/subscriptions"
+2025/11/19 20:46:06 [ПРЕДУПРЕЖДЕНИЕ] конфликт: подписка уже существует | пользователь=0a5f9fb1-690b-491e-9b5c-b434deaff48f сервис=Yandex Plus 2025-07
+[GIN] 2025/11/19 - 20:46:06 | 409 |    1.253831ms |             ::1 | POST     "/api/subscriptions"
+[GIN] 2025/11/19 - 20:46:06 | 400 |      71.984µs |             ::1 | POST     "/api/subscriptions"
+[GIN] 2025/11/19 - 20:46:06 | 400 |      82.141µs |             ::1 | POST     "/api/subscriptions"
+2025/11/19 20:46:06 подписка успешно создана | id=8f2664e0-6adf-4328-a4a5-86e5231fa9eb пользователь=0a5f9fb1-690b-491e-9b5c-b434deaff48f сервис=Spotify год=2025 месяц=07 цена=169₽
+2025/11/19 20:46:06 подписка успешно создана | id=8f2664e0-6adf-4328-a4a5-86e5231fa9eb | Spotify | 2025-07 | 169₽
+[GIN] 2025/11/19 - 20:46:06 | 201 |    3.495543ms |             ::1 | POST     "/api/subscriptions"
+2025/11/19 20:46:06 подписка успешно создана | id=b20258e5-1a4e-431d-814e-7497f56c9ad7 пользователь=0a5f9fb1-690b-491e-9b5c-b434deaff48f сервис=Netflix год=2025 месяц=08 цена=999₽
+2025/11/19 20:46:06 подписка успешно создана | id=b20258e5-1a4e-431d-814e-7497f56c9ad7 | Netflix | 2025-08 | 999₽
+[GIN] 2025/11/19 - 20:46:06 | 201 |    2.673204ms |             ::1 | POST     "/api/subscriptions"
+2025/11/19 20:46:06 подсчитана общая стоимость подписок | пользователь=0a5f9fb1-690b-491e-9b5c-b434deaff48f сервис= период=2025-01..2025-12 итог=1667₽
+2025/11/19 20:46:06 подсчёт общей стоимости | 2025-01..2025-12 | user=0a5f9fb1-690b-491e-9b5c-b434deaff48f | service= | total=1667₽
+[GIN] 2025/11/19 - 20:46:06 | 200 |     1.69351ms |             ::1 | GET      "/api/subscriptions/total?start=2025-01&end=2025-12&user_id=0a5f9fb1-690b-491e-9b5c-b434deaff48f"
+2025/11/19 20:46:06 подсчитана общая стоимость подписок | пользователь=0a5f9fb1-690b-491e-9b5c-b434deaff48f сервис=Yandex Plus период=2025-01..2025-12 итог=499₽
+2025/11/19 20:46:06 подсчёт общей стоимости | 2025-01..2025-12 | user=0a5f9fb1-690b-491e-9b5c-b434deaff48f | service=Yandex Plus | total=499₽
+[GIN] 2025/11/19 - 20:46:06 | 200 |    2.075628ms |             ::1 | GET      "/api/subscriptions/total?start=2025-01&end=2025-12&user_id=0a5f9fb1-690b-491e-9b5c-b434deaff48f&service=Yandex%20Plus"
+2025/11/19 20:46:06 подсчитана общая стоимость подписок | пользователь=0a5f9fb1-690b-491e-9b5c-b434deaff48f сервис= период=2025-08..2025-08 итог=999₽
+2025/11/19 20:46:06 подсчёт общей стоимости | 2025-08..2025-08 | user=0a5f9fb1-690b-491e-9b5c-b434deaff48f | service= | total=999₽
+[GIN] 2025/11/19 - 20:46:06 | 200 |     810.159µs |             ::1 | GET      "/api/subscriptions/total?start=2025-08&end=2025-08&user_id=0a5f9fb1-690b-491e-9b5c-b434deaff48f"
