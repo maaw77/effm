@@ -2,14 +2,6 @@
 // Сервер использует Gin и подключается к PostgreSQL через internal/database.
 // Конфигурация читается из config/config.yaml.
 
-// cmd/server/main.go
-// Точка входа в приложение.
-// Использует реальный config-пакет с InitConnString и InitServerConfig.
-
-// cmd/server/main.go
-// Точка входа в приложение.
-// Полностью совместима с твоим текущим database.Close() → void
-
 package main
 
 import (

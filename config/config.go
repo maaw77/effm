@@ -28,6 +28,8 @@ func InitConnString(pathConfig string) string {
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(dir)
 
+	// pth, _:= os.Getwd()
+	// log.Println("Pwd=", pth)
 	// чтение конфигурации
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
