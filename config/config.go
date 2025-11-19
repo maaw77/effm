@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -69,4 +70,23 @@ func InitServerConfig() ServerConfig {
 		ReadTimeout:  viper.GetDuration("server.ReadTimeout"),
 		WriteTimeout: viper.GetDuration("server.WriteTimeout"),
 	}
+}
+
+// ConnStringForMigrate возвращает connString без pgx-специфичных параметров
+func ConnStringForMigrate(pathConfig string) string {
+	// Читаем обычный connStr
+	full := InitConnString(pathConfig)
+
+	// Убираем pool_max_conns (и любые другие pgx-only параметры, если будут)
+	if strings.Contains(full, "pool_max_conns") {
+		u, err := url.Parse(full)
+		if err != nil {
+			return full // на всякий случай
+		}
+		q := u.Query()
+		q.Del("pool_max_conns")
+		u.RawQuery = q.Encode()
+		return u.String()
+	}
+	return full
 }
