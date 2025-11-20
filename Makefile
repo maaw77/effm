@@ -26,4 +26,7 @@ migr_ver: ### print current migration version
 PHONY: doc
 doc: ### create docs.go
 	~/go/bin/swag init -g cmd/server/main.go --parseDependency --parseInternal --parseDepth 2
+PHONY: lint
+lint: ### linter
+	~/go/bin/golangci-lint run
 

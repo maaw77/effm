@@ -13,9 +13,9 @@ func main() {
 	// Определяем флаги командной строки
 	outputFile := flag.String("output", "project_report.txt", "Имя выходного файла")
 	rootDir := flag.String("dir", ".", "Корневая директория для сканирования")
-	extensions := flag.String("ext", "go,yaml,yml,sql", "Расширения файлов через запятую")
+	extensions := flag.String("ext", "go,yaml,yml,sql,mod", "Расширения файлов через запятую")
 	excludeDirs := flag.String("exclude", "vendor,node_modules,.git,cmd/scanner", "Директории для исключения через запятую")
-	
+
 	flag.Parse()
 
 	// Парсим расширения
@@ -63,7 +63,7 @@ func main() {
 	header += fmt.Sprintf("Расширения: %s\n", strings.Join(extList, ", "))
 	header += fmt.Sprintf("Исключенные директории: %s\n", strings.Join(excludeList, ", "))
 	header += strings.Repeat("=", 80) + "\n\n"
-	
+
 	if _, err := file.WriteString(header); err != nil {
 		fmt.Printf("Ошибка записи в файл: %v\n", err)
 		return
