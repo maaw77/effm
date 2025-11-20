@@ -1,0 +1,38 @@
+run:
+  timeout: 15m
+  modules-download-mode: readonly
+  allow-parallel-runners: true
+  skip-dirs:
+    - docs
+    - migrations
+
+linters:
+  disable-all: true
+  enable:
+    - gofmt           # форматирование
+    - govet           # встроенный анализ Go
+    - gosimple        # упрощение кода
+    - unused          # неиспользуемый код/переменные
+    - ineffassign     # неиспользуемые присваивания
+    - errcheck        # проверка ошибок
+    - gosec           # базовая безопасность
+    - misspell        # опечатки
+    - revive          # стиль
+    - gci             # порядок импортов
+# staticcheck временно отключён, чтобы избежать зависаний
+
+linters-settings:
+  gci:
+    sections:
+      - Standard
+      - Default
+      - Prefix(github.com/maaw/effm)
+    skip-generated: true
+
+  misspell:
+    locale: US
+
+issues:
+  exclude-use-default: true
+  max-issues-per-linter: 0
+  max-same-issues: 0
