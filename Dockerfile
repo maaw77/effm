@@ -1,49 +1,39 @@
-# ---------- СТАДИЯ СБОРКИ ----------
-FROM golang:alpine AS builder
+# ========== BUILDER ==========
+FROM golang:1.25-alpine AS builder
 
-RUN apk update && apk add --no-cache git
-
-# Копируем весь проект
-COPY . /build
+# Устанавливаем только то, что нужно для сборки
+RUN apk add --no-cache git
 
 WORKDIR /build
 
-# Загружаем зависимости
-RUN go mod tidy
+# Кэшируем зависимости (это главное ускорение при пересборке)
+COPY go.mod go.sum ./
+RUN go mod download
 
-# Каталог для итогового бинарника
-RUN mkdir /app
+# Копируем остальной код
+COPY . .
 
-# Собираем бинарник с тегом migrate
-RUN go build -tags migrate -o /app/effm ./cmd/server/
+# Собираем статический бинарник с миграциями
+RUN CGO_ENABLED=0 GOOS=linux go build -tags migrate -ldflags="-s -w" -o /app/effm ./cmd/server/
 
-# ---------- СТАДИЯ РАНТАЙМА ----------
-FROM alpine:latest
+# ========== RUNTIME ==========
+FROM alpine:3.20 AS runtime
 
-RUN apk add --no-cache ca-certificates
-
-# Создаем рабочие каталоги
-RUN mkdir -p /app/config
-RUN mkdir -p /app/docs
-RUN mkdir -p /app/migrations
+# ca-certificates — для HTTPS, tzdata — чтобы время было московское (а не UTC-3)
+RUN apk add --no-cache ca-certificates tzdata
 
 WORKDIR /app
 
-# Бинарник
+# Копируем только то, что реально нужно во время выполнения
 COPY --from=builder /app/effm /app/effm
+COPY config/config.yaml ./config/
+COPY docs/ ./docs/
+COPY migrations/ ./migrations/
 
-# Конфиг
-COPY ./config/config.yaml ./config/
 
-# Swagger-файлы
-COPY ./docs/swagger.yaml ./docs/
-COPY ./docs/docs.go ./docs/  
+# Явно указываем таймзону
+ENV TZ=Europe/Moscow
 
-# Миграции
-COPY ./migrations/* ./migrations/
+EXPOSE 8080
 
-# .env, если он используется
-COPY .env .
-
-# Запуск
 CMD ["/app/effm"]
