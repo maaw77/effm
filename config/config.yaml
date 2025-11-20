@@ -3,8 +3,10 @@ db:
   DB: "postgres"
   User: "postgres"
   Password: "epas"
-  Host: "localhost"
-  Port: 5433
+  # Host: "localhost"
+  # Port: 5433
+  Host: "db"
+  Port: 5432
   PoolMaxConns: 10
 
 # Конфигурация HTTP-сервера

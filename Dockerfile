@@ -1,23 +1,49 @@
+# ---------- СТАДИЯ СБОРКИ ----------
 FROM golang:alpine AS builder
 
 RUN apk update && apk add --no-cache git
 
-COPY . $GOPATH/src/crmsrvg/
+# Копируем весь проект
+COPY . /build
 
-WORKDIR $GOPATH/src/crmsrvg
+WORKDIR /build
+
+# Загружаем зависимости
 RUN go mod tidy
-# RUN go mod download
-RUN mkdir /app
-RUN go build -tags migrate -o /app/crm ./cmd/api-server/
 
+# Каталог для итогового бинарника
+RUN mkdir /app
+
+# Собираем бинарник с тегом migrate
+RUN go build -tags migrate -o /app/effm ./cmd/server/
+
+# ---------- СТАДИЯ РАНТАЙМА ----------
 FROM alpine:latest
 
-RUN mkdir /app
-COPY --from=builder /app/crm /app/crm
-WORKDIR /app 
+RUN apk add --no-cache ca-certificates
+
+# Создаем рабочие каталоги
+RUN mkdir -p /app/config
+RUN mkdir -p /app/docs
+RUN mkdir -p /app/migrations
+
+WORKDIR /app
+
+# Бинарник
+COPY --from=builder /app/effm /app/effm
+
+# Конфиг
 COPY ./config/config.yaml ./config/
-COPY ./docs/swagger.* ./docs/
+
+# Swagger-файлы
+COPY ./docs/swagger.yaml ./docs/
+COPY ./docs/docs.go ./docs/  
+
+# Миграции
 COPY ./migrations/* ./migrations/
+
+# .env, если он используется
 COPY .env .
 
-CMD ["/app/crm", "-config=./config/config.yaml"]
+# Запуск
+CMD ["/app/effm"]
