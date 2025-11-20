@@ -1,0 +1,2387 @@
+Отчет по проекту: .
+Расширения: .go, .yaml, .yml, .sql
+Исключенные директории: vendor, node_modules, .git, cmd/scanner
+================================================================================
+
+cmd/server/main.go
+// main.go
+// Расширение: .go
+
+package main
+
+import (
+	"context"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/maaw77/effm/config"
+	"github.com/maaw77/effm/internal/database"
+	"github.com/maaw77/effm/internal/server"
+
+	// === Swagger ===
+	_ "github.com/maaw77/effm/docs"            // сгенерировано командой swag init
+	swaggerFiles "github.com/swaggo/files"     // ← обязательно с алиасом
+	ginSwagger "github.com/swaggo/gin-swagger" // ← обязательно с алиасом
+)
+
+func main() {
+	connStr := config.InitConnString("config/config.yaml")
+	serverCfg := config.InitServerConfig()
+	log.Printf("server will listen on :%s", serverCfg.Port)
+
+	db, err := database.NewSubscriptionDatabase(context.Background(), connStr)
+	if err != nil {
+		log.Fatalf("failed to connect to PostgreSQL: %v", err)
+	}
+	defer db.Close()
+
+	srv := server.NewServer(db)
+
+	// Swagger UI — доступен по http://localhost:8080/swagger/index.html
+	srv.Router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+
+	httpServer := &http.Server{
+		Addr:         ":" + serverCfg.Port,
+		Handler:      srv.Router,
+		ReadTimeout:  serverCfg.ReadTimeout,
+		WriteTimeout: serverCfg.WriteTimeout,
+	}
+
+	go func() {
+		log.Printf("server started at http://localhost:%s", serverCfg.Port)
+		log.Printf("Swagger UI: http://localhost:%s/swagger/index.html", serverCfg.Port)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("shutdown signal received...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(ctx); err != nil {
+		log.Printf("server forced to shutdown: %v", err)
+	} else {
+		log.Println("server stopped gracefully")
+	}
+}
+
+
+--------------------------------------------------------------------------------
+
+cmd/server/migrate.go
+// migrate.go
+// Расширение: .go
+
+//go:build migrate
+
+package main
+
+import (
+	"log"
+
+	"github.com/golang-migrate/migrate/v4"
+	_ "github.com/golang-migrate/migrate/v4/database/postgres"
+	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/maaw77/effm/config"
+)
+
+func init() {
+	log.Println("running database migrations")
+
+	connStr := config.ConnStringForMigrate("config/config.yaml")
+
+	m, err := migrate.New("file://migrations", connStr)
+	if err != nil {
+		log.Fatalf("failed to initialize migrator: %v", err)
+	}
+	defer m.Close()
+
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		log.Fatalf("migration failed: %v", err)
+	}
+
+	if err == migrate.ErrNoChange {
+		log.Println("migrations are up to date")
+	} else {
+		log.Println("migrations applied")
+	}
+
+	log.Println("migrations completed")
+}
+
+
+--------------------------------------------------------------------------------
+
+config/config.go
+// config.go
+// Расширение: .go
+
+package config
+
+import (
+	"fmt"
+	"log"
+	"net/url"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/spf13/viper"
+)
+
+// InitConnString возвращает строку подключения к PostgreSQL.
+// Если файл конфигурации не найден, используются значения по умолчанию.
+func InitConnString(pathConfig string) string {
+	dir, file := filepath.Split(pathConfig)
+	fileName := strings.Split(file, ".")[0]
+
+	// значения по умолчанию
+	viper.SetDefault("db.DB", "postgres")
+	viper.SetDefault("db.User", "postgres")
+	viper.SetDefault("db.Password", "epas")
+	viper.SetDefault("db.Host", "localhost")
+	viper.SetDefault("db.Port", 5433)
+	viper.SetDefault("db.PoolMaxConns", 10)
+
+	viper.SetConfigName(fileName)
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(dir)
+
+	// pth, _:= os.Getwd()
+	// log.Println("Pwd=", pth)
+	// чтение конфигурации
+	if err := viper.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			log.Println("configuration file not found, using default parameters")
+		} else {
+			log.Fatalf("fatal error reading config file: %v", err)
+		}
+	} else {
+		log.Printf("configuration loaded from %s", pathConfig)
+	}
+
+	// формирование строки подключения
+	connString := fmt.Sprintf(
+		"postgres://%s:%s@%s:%d/%s?sslmode=disable&pool_max_conns=%d",
+		viper.GetString("db.User"),
+		viper.GetString("db.Password"),
+		viper.GetString("db.Host"),
+		viper.GetInt("db.Port"),
+		viper.GetString("db.DB"),
+		viper.GetInt("db.PoolMaxConns"),
+	)
+
+	return connString
+}
+
+// ServerConfig хранит параметры конфигурации HTTP-сервера.
+type ServerConfig struct {
+	Port         string
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+}
+
+// InitServerConfig читает конфиг сервера из YAML
+func InitServerConfig() ServerConfig {
+	return ServerConfig{
+		Port:         viper.GetString("server.Port"),
+		ReadTimeout:  viper.GetDuration("server.ReadTimeout"),
+		WriteTimeout: viper.GetDuration("server.WriteTimeout"),
+	}
+}
+
+// ConnStringForMigrate возвращает connString без pgx-специфичных параметров
+func ConnStringForMigrate(pathConfig string) string {
+	// Читаем обычный connStr
+	full := InitConnString(pathConfig)
+
+	// Убираем pool_max_conns (и любые другие pgx-only параметры, если будут)
+	if strings.Contains(full, "pool_max_conns") {
+		u, err := url.Parse(full)
+		if err != nil {
+			return full // на всякий случай
+		}
+		q := u.Query()
+		q.Del("pool_max_conns")
+		u.RawQuery = q.Encode()
+		return u.String()
+	}
+	return full
+}
+
+
+--------------------------------------------------------------------------------
+
+config/config.yaml
+// config.yaml
+// Расширение: .yaml
+
+# Конфигурация базы данных
+db:
+  DB: "postgres"
+  User: "postgres"
+  Password: "epas"
+  Host: "localhost"
+  Port: 5433
+  PoolMaxConns: 10
+
+# Конфигурация HTTP-сервера
+server:
+  Port: "8080"              # порт для запуска сервера
+  ReadTimeout: 5s           # таймаут чтения запроса
+  WriteTimeout: 5s          # таймаут записи ответа
+
+--------------------------------------------------------------------------------
+
+config/config_test.go
+// config_test.go
+// Расширение: .go
+
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestInitConnString_Defaults(t *testing.T) {
+	expected := "postgres://postgres:epas@localhost:5433/postgres?sslmode=disable&pool_max_conns=10"
+
+	connString := InitConnString("")
+	if connString != expected {
+		t.Errorf("Expected default connection string:\n%s\nGot:\n%s", expected, connString)
+	}
+}
+
+func TestInitConnString_File(t *testing.T) {
+	currDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := filepath.Join(currDir, "config.yaml")
+
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		t.Skipf("config.yaml not found at %s, skipping test", configPath)
+	}
+
+	// Подставляем значения из твоего config.yaml
+	expected := "postgres://postgres:epas@localhost:5433/postgres?sslmode=disable&pool_max_conns=10"
+
+	connString := InitConnString(configPath)
+	if connString != expected {
+		t.Errorf("Expected connection string from file:\n%s\nGot:\n%s", expected, connString)
+	}
+}
+
+
+--------------------------------------------------------------------------------
+
+docker-compose.yml
+// docker-compose.yml
+// Расширение: .yml
+
+services:
+  db:
+    image: postgres  
+    container_name: postgres
+    restart: always
+    volumes:
+      - postgres_data:/var/lib/postgresql  
+    env_file:
+      - ./.env
+    environment:
+      - TZ=Europe/Moscow
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 30s
+      retries: 5
+
+volumes:
+  postgres_data:
+  # serv:
+  #   image: crmserver
+  #   container_name: serv
+  #   build: .
+  #   restart: always
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     - TZ=Europe/Moscow
+  #   depends_on:
+  #     db:
+  #         condition: service_healthy
+
+
+--------------------------------------------------------------------------------
+
+docs/docs.go
+// docs.go
+// Расширение: .go
+
+// Package docs Code generated by swaggo/swag. DO NOT EDIT
+package docs
+
+import "github.com/swaggo/swag"
+
+const docTemplate = `{
+    "schemes": {{ marshal .Schemes }},
+    "swagger": "2.0",
+    "info": {
+        "description": "{{escape .Description}}",
+        "title": "{{.Title}}",
+        "contact": {},
+        "version": "{{.Version}}"
+    },
+    "host": "{{.Host}}",
+    "basePath": "{{.BasePath}}",
+    "paths": {
+        "/subscriptions": {
+            "get": {
+                "description": "Если передать user_id — вернёт только подписки этого пользователя",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "subscriptions"
+                ],
+                "summary": "Список всех подписок",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "UUID пользователя для фильтрации",
+                        "name": "user_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/model.SubscriptionResponse"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Одна запись = оплата за один месяц. Дубли по пользователю + сервису + месяцу запрещены",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "subscriptions"
+                ],
+                "summary": "Создать запись о подписке за конкретный месяц",
+                "parameters": [
+                    {
+                        "description": "Данные подписки",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/model.CreateSubscriptionRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "UUID созданной записи",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "allOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {
+                                                "type": "string"
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "подписка уже существует",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/subscriptions/total": {
+            "get": {
+                "description": "Период задаётся включительно. Поддерживает фильтры по пользователю и сервису",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "subscriptions"
+                ],
+                "summary": "Подсчёт общей стоимости подписок за период",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "example": "2025-01",
+                        "description": "Начало периода (YYYY-MM)",
+                        "name": "start",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "example": "2025-12",
+                        "description": "Конец периода (YYYY-MM)",
+                        "name": "end",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "example": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+                        "description": "UUID пользователя",
+                        "name": "user_id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Название сервиса",
+                        "name": "service",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/model.TotalCostResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/subscriptions/{id}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "subscriptions"
+                ],
+                "summary": "Получить подписку по ID",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "UUID подписки",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/model.SubscriptionResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "Можно менять только название сервиса и/или цену. Месяц и год — неизменяемые",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "subscriptions"
+                ],
+                "summary": "Частично обновить подписку",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "UUID подписки",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Поля для обновления",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/model.UpdateSubscriptionRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "allOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "status": {
+                                                "type": "string"
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "tags": [
+                    "subscriptions"
+                ],
+                "summary": "Удалить подписку",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "UUID подписки",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "allOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "status": {
+                                                "type": "string"
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "model.CreateSubscriptionRequest": {
+            "description": "Данные для создания записи об оплате подписки. Дата в формате YYYY-MM (например, 2025-07)",
+            "type": "object",
+            "required": [
+                "price",
+                "service_name",
+                "user_id",
+                "year_month"
+            ],
+            "properties": {
+                "price": {
+                    "description": "Стоимость за месяц в рублях",
+                    "type": "integer",
+                    "example": 499
+                },
+                "service_name": {
+                    "description": "Название сервиса",
+                    "type": "string",
+                    "example": "Yandex Plus"
+                },
+                "user_id": {
+                    "description": "UUID пользователя",
+                    "type": "string",
+                    "example": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+                },
+                "year_month": {
+                    "description": "Год и месяц в формате YYYY-MM",
+                    "type": "string",
+                    "example": "2025-07"
+                }
+            }
+        },
+        "model.SubscriptionResponse": {
+            "description": "Полная информация о записи подписки с датой создания/обновления",
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "description": "Время создания",
+                    "type": "string",
+                    "example": "2025-07-15T10:23:45Z"
+                },
+                "id": {
+                    "description": "UUID записи",
+                    "type": "string",
+                    "example": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+                },
+                "price": {
+                    "description": "Стоимость за месяц",
+                    "type": "integer",
+                    "example": 499
+                },
+                "service_name": {
+                    "description": "Название сервиса",
+                    "type": "string",
+                    "example": "Yandex Plus"
+                },
+                "updated_at": {
+                    "description": "Время последнего обновления",
+                    "type": "string",
+                    "example": "2025-07-15T10:23:45Z"
+                },
+                "user_id": {
+                    "description": "UUID пользователя",
+                    "type": "string",
+                    "example": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+                },
+                "year_month": {
+                    "description": "Год и месяц в формате YYYY-MM",
+                    "type": "string",
+                    "example": "2025-07"
+                }
+            }
+        },
+        "model.TotalCostResponse": {
+            "description": "Суммарная стоимость всех подходящих подписок за выбранный период",
+            "type": "object",
+            "properties": {
+                "total": {
+                    "description": "Итоговая сумма в рублях",
+                    "type": "integer",
+                    "example": 8599
+                }
+            }
+        },
+        "model.UpdateSubscriptionRequest": {
+            "description": "Можно обновить название сервиса и/или цену. Поля опциональные",
+            "type": "object",
+            "properties": {
+                "price": {
+                    "description": "Новая цена (если 0 — будет проигнорировано)",
+                    "type": "integer",
+                    "example": 599
+                },
+                "service_name": {
+                    "description": "Новое название сервиса",
+                    "type": "string",
+                    "example": "Yandex Plus Premium"
+                }
+            }
+        }
+    }
+}`
+
+// SwaggerInfo holds exported Swagger Info so clients can modify it
+var SwaggerInfo = &swag.Spec{
+	Version:          "",
+	Host:             "",
+	BasePath:         "",
+	Schemes:          []string{},
+	Title:            "",
+	Description:      "",
+	InfoInstanceName: "swagger",
+	SwaggerTemplate:  docTemplate,
+	LeftDelim:        "{{",
+	RightDelim:       "}}",
+}
+
+func init() {
+	swag.Register(SwaggerInfo.InstanceName(), SwaggerInfo)
+}
+
+
+--------------------------------------------------------------------------------
+
+docs/swagger.yaml
+// swagger.yaml
+// Расширение: .yaml
+
+definitions:
+  github_com_maaw77_effm_internal_dto.CreateSubscriptionRequest:
+    description: Данные для создания записи об оплате подписки. Дата в формате YYYY-MM
+      (например, 2025-07)
+    properties:
+      price:
+        description: Стоимость за месяц в рублях
+        example: 499
+        type: integer
+      service_name:
+        description: Название сервиса
+        example: Yandex Plus
+        type: string
+      user_id:
+        description: UUID пользователя
+        example: f47ac10b-58cc-4372-a567-0e02b2c3d479
+        type: string
+      year_month:
+        description: Год и месяц в формате YYYY-MM
+        example: 2025-07
+        type: string
+    required:
+    - price
+    - service_name
+    - user_id
+    - year_month
+    type: object
+  github_com_maaw77_effm_internal_dto.SubscriptionResponse:
+    description: Полная информация о записи подписки с датой создания/обновления
+    properties:
+      created_at:
+        description: Время создания
+        example: "2025-07-15T10:23:45Z"
+        type: string
+      id:
+        description: UUID записи
+        example: f47ac10b-58cc-4372-a567-0e02b2c3d479
+        type: string
+      price:
+        description: Стоимость за месяц
+        example: 499
+        type: integer
+      service_name:
+        description: Название сервиса
+        example: Yandex Plus
+        type: string
+      updated_at:
+        description: Время последнего обновления
+        example: "2025-07-15T10:23:45Z"
+        type: string
+      user_id:
+        description: UUID пользователя
+        example: f47ac10b-58cc-4372-a567-0e02b2c3d479
+        type: string
+      year_month:
+        description: Год и месяц в формате YYYY-MM
+        example: 2025-07
+        type: string
+    type: object
+  github_com_maaw77_effm_internal_dto.TotalCostResponse:
+    description: Суммарная стоимость всех подходящих подписок за выбранный период
+    properties:
+      total:
+        description: Итоговая сумма в рублях
+        example: 8599
+        type: integer
+    type: object
+  github_com_maaw77_effm_internal_dto.UpdateSubscriptionRequest:
+    description: Можно обновить название сервиса и/или цену. Поля опциональные
+    properties:
+      price:
+        description: Новая цена (если 0 — будет проигнорировано)
+        example: 599
+        type: integer
+      service_name:
+        description: Новое название сервиса
+        example: Yandex Plus Premium
+        type: string
+    type: object
+info:
+  contact: {}
+paths:
+  /subscriptions:
+    get:
+      description: Если передать user_id — вернёт только подписки этого пользователя
+      parameters:
+      - description: UUID пользователя для фильтрации
+        in: query
+        name: user_id
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/github_com_maaw77_effm_internal_dto.SubscriptionResponse'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Список всех подписок
+      tags:
+      - subscriptions
+    post:
+      consumes:
+      - application/json
+      description: Одна запись = оплата за один месяц. Дубли по пользователю + сервису
+        + месяцу запрещены
+      parameters:
+      - description: Данные подписки
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/github_com_maaw77_effm_internal_dto.CreateSubscriptionRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: UUID созданной записи
+          schema:
+            additionalProperties:
+              allOf:
+              - type: string
+              - properties:
+                  id:
+                    type: string
+                type: object
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: подписка уже существует
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Создать запись о подписке за конкретный месяц
+      tags:
+      - subscriptions
+  /subscriptions/{id}:
+    delete:
+      parameters:
+      - description: UUID подписки
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              allOf:
+              - type: string
+              - properties:
+                  status:
+                    type: string
+                type: object
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Удалить подписку
+      tags:
+      - subscriptions
+    get:
+      parameters:
+      - description: UUID подписки
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_maaw77_effm_internal_dto.SubscriptionResponse'
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Получить подписку по ID
+      tags:
+      - subscriptions
+    put:
+      consumes:
+      - application/json
+      description: Можно менять только название сервиса и/или цену. Месяц и год —
+        неизменяемые
+      parameters:
+      - description: UUID подписки
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Поля для обновления
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/github_com_maaw77_effm_internal_dto.UpdateSubscriptionRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              allOf:
+              - type: string
+              - properties:
+                  status:
+                    type: string
+                type: object
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Частично обновить подписку
+      tags:
+      - subscriptions
+  /subscriptions/total:
+    get:
+      description: Период задаётся включительно. Поддерживает фильтры по пользователю
+        и сервису
+      parameters:
+      - description: Начало периода (YYYY-MM)
+        example: 2025-01
+        in: query
+        name: start
+        required: true
+        type: string
+      - description: Конец периода (YYYY-MM)
+        example: 2025-12
+        in: query
+        name: end
+        required: true
+        type: string
+      - description: UUID пользователя
+        example: f47ac10b-58cc-4372-a567-0e02b2c3d479
+        in: query
+        name: user_id
+        type: string
+      - description: Название сервиса
+        in: query
+        name: service
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/github_com_maaw77_effm_internal_dto.TotalCostResponse'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Подсчёт общей стоимости подписок за период
+      tags:
+      - subscriptions
+swagger: "2.0"
+
+
+--------------------------------------------------------------------------------
+
+internal/database/database.go
+// database.go
+// Расширение: .go
+
+// internal/database/database.go
+// Пакет database реализует слой доступа к данным (repository) для работы с подписками пользователей.
+// Используется PostgreSQL + pgxpool. Все операции асинхронно-безопасны и работают через context.
+//
+// Основные принципы:
+//   - Одна запись в таблице = оплата за конкретный месяц (модель "monthly billing")
+//   - Уникальность: один пользователь — один сервис — один месяц
+//   - Все ошибки логируются, критичные бизнес-ошибки возвращаются наружу
+package database
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/maaw77/effm/internal/models"
+)
+
+// Предопределённые ошибки для бизнес-логики
+var (
+	ErrNotExist = errors.New("подписка не найдена")
+	ErrConflict = errors.New("подписка на этот сервис за указанный месяц уже существует")
+)
+
+// SubscriptionDatabase — основной объект для работы с БД
+type SubscriptionDatabase struct {
+	DBpool *pgxpool.Pool
+}
+
+// NewSubscriptionDatabase создаёт пул соединений с PostgreSQL.
+// Возвращает готовый к работе объект или ошибку подключения.
+func NewSubscriptionDatabase(ctx context.Context, connStr string) (*SubscriptionDatabase, error) {
+	if connStr == "" {
+		return nil, errors.New("строка подключения пустая")
+	}
+
+	config, err := pgxpool.ParseConfig(connStr)
+	if err != nil {
+		return nil, fmt.Errorf("невозможно распарсить connString: %w", err)
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("не удалось создать пул соединений: %w", err)
+	}
+
+	log.Printf("успешно подключено к PostgreSQL | pool_max_conns=%d", config.MaxConns)
+	return &SubscriptionDatabase{DBpool: pool}, nil
+}
+
+// Close закрывает пул соединений с БД
+func (db *SubscriptionDatabase) Close() {
+	if db.DBpool != nil {
+		db.DBpool.Close()
+		log.Println("соединение с PostgreSQL закрыто")
+	}
+}
+
+// Create создаёт запись о подписке за конкретный месяц.
+// Возвращает UUID созданной записи или ошибку (в т.ч. ErrConflict при дублировании).
+func (db *SubscriptionDatabase) Create(ctx context.Context, sub models.Subscription) (string, error) {
+	var id string
+	err := db.DBpool.QueryRow(ctx,
+		`INSERT INTO subscriptions (service_name, price, user_id, year, month)
+		 VALUES ($1, $2, $3, $4, $5)
+		 RETURNING id`,
+		sub.ServiceName, sub.Price, sub.UserID, sub.Year, sub.Month,
+	).Scan(&id)
+
+	if err != nil {
+		if isUniqueViolation(err) {
+			log.Printf("[ПРЕДУПРЕЖДЕНИЕ] конфликт: подписка уже существует | пользователь=%s сервис=%s %d-%02d",
+				sub.UserID, sub.ServiceName, sub.Year, sub.Month)
+			return "", ErrConflict
+		}
+		log.Printf("ошибка создания подписки | ошибка=%v", err)
+		return "", err
+	}
+
+	log.Printf("подписка успешно создана | id=%s пользователь=%s сервис=%s год=%d месяц=%02d цена=%d₽",
+		id, sub.UserID, sub.ServiceName, sub.Year, sub.Month, sub.Price)
+
+	return id, nil
+}
+
+// Get возвращает подписку по её UUID
+func (db *SubscriptionDatabase) Get(ctx context.Context, id string) (models.Subscription, error) {
+	var sub models.Subscription
+	err := db.DBpool.QueryRow(ctx,
+		`SELECT id, service_name, price, user_id, year, month, created_at, updated_at
+		 FROM subscriptions WHERE id = $1`,
+		id,
+	).Scan(&sub.ID, &sub.ServiceName, &sub.Price, &sub.UserID,
+		&sub.Year, &sub.Month, &sub.CreatedAt, &sub.UpdatedAt)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return sub, ErrNotExist
+	}
+	if err != nil {
+		log.Printf("ошибка получения подписки id=%s | ошибка=%v", id, err)
+		return sub, err
+	}
+	return sub, nil
+}
+
+// Update изменяет название сервиса и/или цену существующей подписки.
+// Месяц и год изменить нельзя — это историческая запись.
+func (db *SubscriptionDatabase) Update(ctx context.Context, id string, updates models.Subscription) error {
+	cmd, err := db.DBpool.Exec(ctx,
+		`UPDATE subscriptions
+		 SET service_name = COALESCE(NULLIF($1, ''), service_name),
+		     price = COALESCE($2, price),
+		     updated_at = NOW()
+		 WHERE id = $3`,
+		updates.ServiceName, nilIfZero(updates.Price), id,
+	)
+	if err != nil {
+		log.Printf("ошибка обновления подписки id=%s | ошибка=%v", id, err)
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return ErrNotExist
+	}
+	log.Printf("подписка успешно обновлена | id=%s", id)
+	return nil
+}
+
+// Delete удаляет подписку по UUID
+func (db *SubscriptionDatabase) Delete(ctx context.Context, id string) error {
+	cmd, err := db.DBpool.Exec(ctx, `DELETE FROM subscriptions WHERE id = $1`, id)
+	if err != nil {
+		log.Printf("ошибка удаления подписки id=%s | ошибка=%v", id, err)
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return ErrNotExist
+	}
+	log.Printf("подписка успешно удалена | id=%s", id)
+	return nil
+}
+
+// List возвращает все подписки (или только одного пользователя), отсортированные по дате (новые сверху)
+func (db *SubscriptionDatabase) List(ctx context.Context, userID string) ([]models.Subscription, error) {
+	query := `SELECT id, service_name, price, user_id, year, month, created_at, updated_at
+	          FROM subscriptions`
+	var args []interface{}
+	if userID != "" {
+		query += " WHERE user_id = $1"
+		args = append(args, userID)
+	}
+	query += " ORDER BY year DESC, month DESC"
+
+	rows, err := db.DBpool.Query(ctx, query, args...)
+	if err != nil {
+		log.Printf("ошибка получения списка подписок | ошибка=%v", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []models.Subscription
+	for rows.Next() {
+		var sub models.Subscription
+		if err := rows.Scan(&sub.ID, &sub.ServiceName, &sub.Price, &sub.UserID,
+			&sub.Year, &sub.Month, &sub.CreatedAt, &sub.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, sub)
+	}
+	return result, rows.Err()
+}
+
+// SumSubscriptionsCost — главный бизнес-метод: считает суммарную стоимость подписок за период.
+// Период задаётся включительно (например, 2025-01 по 2025-12 = весь 2025 год).
+func (db *SubscriptionDatabase) SumSubscriptionsCost(
+	ctx context.Context,
+	userID, serviceName string,
+	startYear, startMonth, endYear, endMonth int,
+) (int, error) {
+
+	query := `SELECT COALESCE(SUM(price), 0)
+	          FROM subscriptions
+	          WHERE (year > $1 OR (year = $1 AND month >= $2))
+	            AND (year < $3 OR (year = $3 AND month <= $4))`
+
+	args := []interface{}{startYear, startMonth, endYear, endMonth}
+	argIdx := 5
+
+	if userID != "" {
+		query += fmt.Sprintf(" AND user_id = $%d", argIdx)
+		args = append(args, userID)
+		argIdx++
+	}
+	if serviceName != "" {
+		query += " AND service_name = $" + fmt.Sprint(argIdx)
+		args = append(args, serviceName)
+	}
+
+	var total int
+	err := db.DBpool.QueryRow(ctx, query, args...).Scan(&total)
+	if err != nil {
+		log.Printf("ошибка подсчёта общей стоимости | ошибка=%v", err)
+		return 0, err
+	}
+
+	// Самый важный лог в приложении — всегда видно, что и сколько посчитали
+	log.Printf("подсчитана общая стоимость подписок | пользователь=%s сервис=%s период=%d-%02d..%d-%02d итог=%d₽",
+		userID, serviceName, startYear, startMonth, endYear, endMonth, total)
+
+	return total, nil
+}
+
+// ——————————————————————————————————————————————————————————————————————
+// Вспомогательные функции
+
+// isUniqueViolation проверяет, что ошибка — это нарушение уникального индекса
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := err.Error()
+	return errMsg == `ERROR: duplicate key value violates unique constraint "subscriptions_user_id_service_name_year_month_key" (SQLSTATE 23505)`
+}
+
+// nilIfZero помогает передать NULL в COALESCE при обновлении цены
+func nilIfZero(v int) interface{} {
+	if v == 0 {
+		return nil
+	}
+	return v
+}
+
+
+--------------------------------------------------------------------------------
+
+internal/database/datbase_test.go
+// datbase_test.go
+// Расширение: .go
+
+// internal/database/database_test.go
+// Пакет database содержит модульные тесты для слоя работы с БД.
+// Тесты проверяют корректность всех операций: создание, чтение, обновление, удаление,
+// уникальность записей и главное — правильность подсчёта общей стоимости за период.
+
+package database
+
+import (
+	"context"
+	"testing"
+
+	"github.com/google/uuid"
+	"github.com/maaw77/effm/config"
+	"github.com/maaw77/effm/internal/models"
+)
+
+var testDB *SubscriptionDatabase
+
+// TestMain выполняется один раз до и после всех тестов.
+// Подключаемся к тестовой БД, очищаем таблицу и закрываем соединение в конце.
+func TestMain(m *testing.M) {
+	ctx := context.Background()
+
+	// Читаем строку подключения из config.yaml
+	connStr := config.InitConnString("config/config.yaml")
+
+	var err error
+	testDB, err = NewSubscriptionDatabase(ctx, connStr)
+	if err != nil {
+		panic("failed to connect to test database: " + err.Error())
+	}
+	defer testDB.Close() // ← исправлено: было testTestDB
+
+	// Очищаем таблицу перед запуском тестов
+	_, err = testDB.DBpool.Exec(ctx, "TRUNCATE TABLE subscriptions RESTART IDENTITY")
+	if err != nil {
+		panic("failed to truncate subscriptions table: " + err.Error())
+	}
+
+	m.Run()
+}
+
+// newTestSubscription — вспомогательная функция для создания тестовой подписки
+func newTestSubscription(year, month int) models.Subscription {
+	return models.Subscription{
+		ServiceName: "TestService",
+		Price:       999,
+		UserID:      uuid.New().String(),
+		Year:        year,
+		Month:       month,
+	}
+}
+
+// TestCreateAndGet проверяет создание подписки и её последующее чтение по ID
+func TestCreateAndGet(t *testing.T) {
+	ctx := context.Background()
+	sub := newTestSubscription(2025, 7)
+
+	id, err := testDB.Create(ctx, sub)
+	if err != nil {
+		t.Fatalf("failed to create subscription: %v", err)
+	}
+
+	got, err := testDB.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("failed to get subscription by id=%s: %v", id, err)
+	}
+
+	if got.ID != id ||
+		got.ServiceName != sub.ServiceName ||
+		got.Price != sub.Price ||
+		got.UserID != sub.UserID ||
+		got.Year != 2025 || got.Month != 7 {
+		t.Fatalf("retrieved subscription does not match created one.\nWant: %+v\nGot:  %+v", sub, got)
+	}
+}
+
+// TestCreateConflict проверяет, что нельзя создать две одинаковые подписки за один месяц
+func TestCreateConflict(t *testing.T) {
+	ctx := context.Background()
+	sub := newTestSubscription(2025, 8)
+
+	_, err := testDB.Create(ctx, sub)
+	if err != nil {
+		t.Fatalf("first creation failed: %v", err)
+	}
+
+	_, err = testDB.Create(ctx, sub)
+	if err != ErrConflict {
+		t.Fatalf("expected ErrConflict on duplicate subscription, got: %v (%T)", err, err)
+	}
+}
+
+// TestUpdate проверяет обновление названия и цены существующей подписки
+func TestUpdate(t *testing.T) {
+	ctx := context.Background()
+	sub := newTestSubscription(2025, 9)
+	id, _ := testDB.Create(ctx, sub)
+
+	updates := models.Subscription{
+		ServiceName: "UpdatedService",
+		Price:       1500,
+	}
+
+	err := testDB.Update(ctx, id, updates)
+	if err != nil {
+		t.Fatalf("failed to update subscription: %v", err)
+	}
+
+	updated, _ := testDB.Get(ctx, id)
+	if updated.ServiceName != "UpdatedService" || updated.Price != 1500 {
+		t.Fatalf("subscription was not updated. Want ServiceName=UpdatedService, Price=1500, got: %+v", updated)
+	}
+}
+
+// TestDelete проверяет удаление подписки и что после удаления она не находится
+func TestDelete(t *testing.T) {
+	ctx := context.Background()
+	sub := newTestSubscription(2025, 10)
+	id, _ := testDB.Create(ctx, sub)
+
+	err := testDB.Delete(ctx, id)
+	if err != nil {
+		t.Fatalf("failed to delete subscription: %v", err)
+	}
+
+	_, err = testDB.Get(ctx, id)
+	if err != ErrNotExist {
+		t.Fatalf("expected ErrNotExist after deletion, got: %v", err)
+	}
+}
+
+// TestList проверяет получение списка всех подписок и фильтрацию по пользователю
+func TestList(t *testing.T) {
+	ctx := context.Background()
+	userID := uuid.New().String()
+
+	// Создаём 3 подписки одного пользователя
+	for i := 1; i <= 3; i++ {
+		sub := models.Subscription{
+			ServiceName: "ListTest",
+			Price:       100 + i*100,
+			UserID:      userID,
+			Year:        2025,
+			Month:       i,
+		}
+		_, err := testDB.Create(ctx, sub)
+		if err != nil {
+			t.Fatalf("failed to create test subscription: %v", err)
+		}
+	}
+
+	all, err := testDB.List(ctx, "")
+	if err != nil {
+		t.Fatalf("failed to list all subscriptions: %v", err)
+	}
+	if len(all) < 3 {
+		t.Fatalf("expected at least 3 subscriptions in total list, got %d", len(all))
+	}
+
+	userOnly, err := testDB.List(ctx, userID)
+	if err != nil {
+		t.Fatalf("failed to list user's subscriptions: %v", err)
+	}
+	if len(userOnly) != 3 {
+		t.Fatalf("expected exactly 3 subscriptions for user, got %d", len(userOnly))
+	}
+}
+
+// TestSumSubscriptionsCost — самый важный тест!
+// Проверяет корректность подсчёта общей стоимости за период.
+func TestSumSubscriptionsCost(t *testing.T) {
+	ctx := context.Background()
+	userID := uuid.New().String()
+
+	// Создаём тестовые подписки
+	testSubs := []models.Subscription{
+		{ServiceName: "A", Price: 500, UserID: userID, Year: 2025, Month: 1},
+		{ServiceName: "B", Price: 600, UserID: userID, Year: 2025, Month: 2},
+		{ServiceName: "A", Price: 700, UserID: userID, Year: 2025, Month: 3},
+		{ServiceName: "A", Price: 800, UserID: userID, Year: 2026, Month: 1}, // не должен попасть в 2025
+	}
+
+	for _, s := range testSubs {
+		_, err := testDB.Create(ctx, s)
+		if err != nil {
+			t.Fatalf("failed to create test subscription: %v", err)
+		}
+	}
+
+	// 2025 год целиком → 500 + 600 + 700 = 1800
+	total, err := testDB.SumSubscriptionsCost(ctx, userID, "", 2025, 1, 2025, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1800 {
+		t.Fatalf("expected 1800₽ for 2025, got %d₽", total)
+	}
+
+	// Только сервис "A" в 2025 → 500 + 700 = 1200
+	total, err = testDB.SumSubscriptionsCost(ctx, userID, "A", 2025, 1, 2025, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1200 {
+		t.Fatalf("expected 1200₽ for service A in 2025, got %d₽", total)
+	}
+
+	// Только февраль 2025 → 600
+	total, err = testDB.SumSubscriptionsCost(ctx, userID, "", 2025, 2, 2025, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 600 {
+		t.Fatalf("expected 600₽ for February 2025, got %d₽", total)
+	}
+}
+
+
+--------------------------------------------------------------------------------
+
+internal/dto/dto.go
+// dto.go
+// Расширение: .go
+
+// Пакет dto содержит структуры для приёма и отдачи данных через HTTP API.
+// Все даты теперь в формате YYYY-MM (например, "2025-07") — это и удобно, и однозначно.
+
+package dto
+
+// CreateSubscriptionRequest — тело запроса на создание подписки за конкретный месяц
+// @Description Данные для создания записи об оплате подписки. Дата в формате YYYY-MM (например, 2025-07)
+//
+//	@Example {
+//	  "service_name": "Yandex Plus",
+//	  "price": 499,
+//	  "user_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+//	  "year_month": "2025-07"
+//	}
+type CreateSubscriptionRequest struct {
+	ServiceName string `json:"service_name" binding:"required" example:"Yandex Plus" validate:"required"`                               // Название сервиса
+	Price       int    `json:"price" binding:"required,gt=0" example:"499" validate:"gt=0"`                                             // Стоимость за месяц в рублях
+	UserID      string `json:"user_id" binding:"required,uuid" example:"f47ac10b-58cc-4372-a567-0e02b2c3d479" validate:"required,uuid"` // UUID пользователя
+	YearMonth   string `json:"year_month" binding:"required,len=7" example:"2025-07" validate:"required"`                               // Год и месяц в формате YYYY-MM
+}
+
+// UpdateSubscriptionRequest — частичное обновление подписки (только то, что можно менять)
+// @Description Можно обновить название сервиса и/или цену. Поля опциональные
+type UpdateSubscriptionRequest struct {
+	ServiceName *string `json:"service_name,omitempty" example:"Yandex Plus Premium"`   // Новое название сервиса
+	Price       *int    `json:"price,omitempty" binding:"omitempty,gt=0" example:"599"` // Новая цена (если 0 — будет проигнорировано)
+}
+
+// SubscriptionResponse — ответ при чтении одной подписки или списка
+// @Description Полная информация о записи подписки с датой создания/обновления
+type SubscriptionResponse struct {
+	ID          string `json:"id" example:"f47ac10b-58cc-4372-a567-0e02b2c3d479"`      // UUID записи
+	ServiceName string `json:"service_name" example:"Yandex Plus"`                     // Название сервиса
+	Price       int    `json:"price" example:"499"`                                    // Стоимость за месяц
+	UserID      string `json:"user_id" example:"f47ac10b-58cc-4372-a567-0e02b2c3d479"` // UUID пользователя
+	YearMonth   string `json:"year_month" example:"2025-07"`                           // Год и месяц в формате YYYY-MM
+	CreatedAt   string `json:"created_at" example:"2025-07-15T10:23:45Z"`              // Время создания
+	UpdatedAt   string `json:"updated_at" example:"2025-07-15T10:23:45Z"`              // Время последнего обновления
+}
+
+// TotalCostRequest — параметры для подсчёта общей стоимости
+type TotalCostRequest struct {
+	Start   string  `form:"start" binding:"required,len=7" example:"2025-01"`                                          // Начало периода YYYY-MM
+	End     string  `form:"end" binding:"required,len=7" example:"2025-12"`                                            // Конец периода YYYY-MM
+	UserID  *string `form:"user_id,omitempty" binding:"omitempty,uuid" example:"f47ac10b-58cc-4372-a567-0e02b2c3d479"` // Опционально: фильтр по пользователю
+	Service *string `form:"service,omitempty" example:"Yandex Plus"`                                                   // Опционально: фильтр по сервису
+}
+
+// TotalCostResponse — результат подсчёта
+// @Description Суммарная стоимость всех подходящих подписок за выбранный период
+type TotalCostResponse struct {
+	Total int `json:"total" example:"8599"` // Итоговая сумма в рублях
+}
+
+
+--------------------------------------------------------------------------------
+
+internal/models/models.go
+// models.go
+// Расширение: .go
+
+// internal/models/models.go
+// Пакет models содержит структуры данных для работы с подписками.
+// Структура Subscription полностью соответствует таблице subscriptions в PostgreSQL.
+// Одна запись = оплата за конкретный месяц (модель "monthly billing").
+
+package models
+
+import "time"
+
+// Subscription представляет запись о подписке пользователя за конкретный месяц.
+// Поля соответствуют таблице subscriptions в БД.
+type Subscription struct {
+	// ID подписки (UUID, PRIMARY KEY)
+	ID string `db:"id" json:"id"`
+
+	// Название сервиса (например, "Yandex Plus")
+	ServiceName string `db:"service_name" json:"service_name"`
+
+	// Стоимость за месяц в рублях (целое число, >= 0)
+	Price int `db:"price" json:"price"`
+
+	// ID пользователя (UUID)
+	UserID string `db:"user_id" json:"user_id"`
+
+	// Год подписки (2000-2100)
+	Year int `db:"year" json:"year"`
+
+	// Месяц подписки (1-12)
+	Month int `db:"month" json:"month"`
+
+	// Дата и время создания записи
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
+
+	// Дата и время последнего обновления
+	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+}
+
+
+--------------------------------------------------------------------------------
+
+internal/server/server.go
+// server.go
+// Расширение: .go
+
+// Пакет server реализует HTTP-слой (REST API) приложения.
+// Используется фреймворк Gin. Все ручки работают с новой моделью данных:
+// одна запись = оплата подписки за конкретный месяц (year + month).
+
+package server
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/maaw77/effm/internal/database"
+	"github.com/maaw77/effm/internal/dto"
+	"github.com/maaw77/effm/internal/models"
+)
+
+// Server — основной объект HTTP-сервера
+type Server struct {
+	Router *gin.Engine
+	DB     *database.SubscriptionDatabase
+}
+
+// NewServer создаёт и настраивает сервер со всеми роутами
+//
+//	@title           Subscriptions API
+//	@version         1.0
+//	@description     REST-сервис для агрегации данных об онлайн-подписках пользователей
+//	@contact.name    API Support
+//	@contact.email   support@example.com
+//	@license.name    MIT
+//	@host            localhost:8080
+//	@BasePath        /api
+func NewServer(db *database.SubscriptionDatabase) *Server {
+	s := &Server{
+		Router: gin.Default(),
+		DB:     db,
+	}
+
+	api := s.Router.Group("/api")
+	{
+		api.POST("/subscriptions", s.createSubscriptionHandler)
+		api.GET("/subscriptions", s.listSubscriptionsHandler)
+		api.GET("/subscriptions/:id", s.getSubscriptionHandler)
+		api.PUT("/subscriptions/:id", s.updateSubscriptionHandler)
+		api.DELETE("/subscriptions/:id", s.deleteSubscriptionHandler)
+		api.GET("/subscriptions/total", s.sumSubscriptionsHandler)
+	}
+
+	return s
+}
+
+// parseYearMonth преобразует строку "2025-07" в год и месяц с валидацией
+func parseYearMonth(s string) (int, int, error) {
+	var year, month int
+	n, err := fmt.Sscanf(s, "%d-%02d", &year, &month)
+	if err != nil || n != 2 {
+		return 0, 0, fmt.Errorf("неверный формат даты: %s (ожидается YYYY-MM)", s)
+	}
+	if month < 1 || month > 12 {
+		return 0, 0, fmt.Errorf("месяц должен быть от 01 до 12, получено: %02d", month)
+	}
+	if year < 2000 || year > 2100 {
+		return 0, 0, fmt.Errorf("год должен быть от 2000 до 2100, получено: %d", year)
+	}
+	return year, month, nil
+}
+
+// createSubscriptionHandler — создаёт запись об оплате подписки за конкретный месяц
+// @Summary      Создать запись о подписке за конкретный месяц
+// @Description  Одна запись = оплата за один месяц. Дубли по пользователю + сервису + месяцу запрещены
+// @Tags         subscriptions
+// @Accept       json
+// @Produce      json
+// @Param        request body     dto.CreateSubscriptionRequest true "Данные подписки"
+// @Success      201    {object} map[string]string{id=string} "UUID созданной записи"
+// @Failure      400    {object} map[string]string
+// @Failure      409    {object} map[string]string "подписка уже существует"
+// @Failure      500    {object} map[string]string
+// @Router       /subscriptions [post]
+func (s *Server) createSubscriptionHandler(c *gin.Context) {
+	var req dto.CreateSubscriptionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "некорректное тело запроса", "details": err.Error()})
+		return
+	}
+
+	year, month, err := parseYearMonth(req.YearMonth)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	sub := models.Subscription{
+		ServiceName: req.ServiceName,
+		Price:       req.Price,
+		UserID:      req.UserID,
+		Year:        year,
+		Month:       month,
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	id, err := s.DB.Create(ctx, sub)
+	if err != nil {
+		if err == database.ErrConflict {
+			c.JSON(http.StatusConflict, gin.H{"error": "подписка на этот сервис за указанный месяц уже существует"})
+			return
+		}
+		log.Printf("ошибка создания подписки: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		return
+	}
+
+	log.Printf("подписка успешно создана | id=%s | %s | %d-%02d | %d₽", id, req.ServiceName, year, month, req.Price)
+	c.JSON(http.StatusCreated, gin.H{"id": id})
+}
+
+// getSubscriptionHandler — возвращает одну подписку по её UUID
+// @Summary      Получить подписку по ID
+// @Tags         subscriptions
+// @Produce      json
+// @Param        id  path     string true "UUID подписки"
+// @Success      200 {object} dto.SubscriptionResponse
+// @Failure      404 {object} map[string]string
+// @Failure      500 {object} map[string]string
+// @Router       /subscriptions/{id} [get]
+func (s *Server) getSubscriptionHandler(c *gin.Context) {
+	id := c.Param("id")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	sub, err := s.DB.Get(ctx, id)
+	if err != nil {
+		if err == database.ErrNotExist {
+			c.JSON(http.StatusNotFound, gin.H{"error": "подписка не найдена"})
+			return
+		}
+		log.Printf("ошибка получения подписки id=%s: %v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		return
+	}
+
+	resp := dto.SubscriptionResponse{
+		ID:          sub.ID,
+		ServiceName: sub.ServiceName,
+		Price:       sub.Price,
+		UserID:      sub.UserID,
+		YearMonth:   fmt.Sprintf("%d-%02d", sub.Year, sub.Month),
+		CreatedAt:   sub.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:   sub.UpdatedAt.Format(time.RFC3339),
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// updateSubscriptionHandler — частично обновляет подписку (только название и/или цену)
+// @Summary      Частично обновить подписку
+// @Description  Можно менять только название сервиса и/или цену. Месяц и год — неизменяемые
+// @Tags         subscriptions
+// @Accept       json
+// @Produce      json
+// @Param        id      path     string                        true  "UUID подписки"
+// @Param        request  body     dto.UpdateSubscriptionRequest true  "Поля для обновления"
+// @Success      200 {object} map[string]string{status=string}
+// @Failure      400,404,500 {object} map[string]string
+// @Router       /subscriptions/{id} [put]
+func (s *Server) updateSubscriptionHandler(c *gin.Context) {
+	id := c.Param("id")
+
+	var req dto.UpdateSubscriptionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "некорректное тело запроса", "details": err.Error()})
+		return
+	}
+
+	updates := models.Subscription{}
+	if req.ServiceName != nil {
+		updates.ServiceName = *req.ServiceName
+	}
+	if req.Price != nil {
+		updates.Price = *req.Price
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := s.DB.Update(ctx, id, updates); err != nil {
+		if err == database.ErrNotExist {
+			c.JSON(http.StatusNotFound, gin.H{"error": "подписка не найдена"})
+			return
+		}
+		log.Printf("ошибка обновления подписки id=%s: %v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		return
+	}
+
+	log.Printf("подписка успешно обновлена | id=%s", id)
+	c.JSON(http.StatusOK, gin.H{"status": "updated"})
+}
+
+// deleteSubscriptionHandler — удаляет подписку по UUID
+// @Summary      Удалить подписку
+// @Tags         subscriptions
+// @Param        id  path     string true "UUID подписки"
+// @Success      200 {object} map[string]string{status=string}
+// @Failure      404,500 {object} map[string]string
+// @Router       /subscriptions/{id} [delete]
+func (s *Server) deleteSubscriptionHandler(c *gin.Context) {
+	id := c.Param("id")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := s.DB.Delete(ctx, id); err != nil {
+		if err == database.ErrNotExist {
+			c.JSON(http.StatusNotFound, gin.H{"error": "подписка не найдена"})
+			return
+		}
+		log.Printf("ошибка удаления подписки id=%s: %v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		return
+	}
+
+	log.Printf("подписка успешно удалена | id=%s", id)
+	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+}
+
+// listSubscriptionsHandler — возвращает список всех подписок (с фильтром по пользователю)
+// @Summary      Список всех подписок
+// @Description  Если передать user_id — вернёт только подписки этого пользователя
+// @Tags         subscriptions
+// @Produce      json
+// @Param        user_id query string false "UUID пользователя для фильтрации"
+// @Success      200 {array} dto.SubscriptionResponse
+// @Failure      500 {object} map[string]string
+// @Router       /subscriptions [get]
+func (s *Server) listSubscriptionsHandler(c *gin.Context) {
+	userID := c.Query("user_id")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	subs, err := s.DB.List(ctx, userID)
+	if err != nil {
+		log.Printf("ошибка получения списка подписок: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		return
+	}
+
+	var resp []dto.SubscriptionResponse
+	for _, sub := range subs {
+		resp = append(resp, dto.SubscriptionResponse{
+			ID:          sub.ID,
+			ServiceName: sub.ServiceName,
+			Price:       sub.Price,
+			UserID:      sub.UserID,
+			YearMonth:   fmt.Sprintf("%d-%02d", sub.Year, sub.Month),
+			CreatedAt:   sub.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:   sub.UpdatedAt.Format(time.RFC3339),
+		})
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// sumSubscriptionsHandler — считает суммарную стоимость подписок за период с фильтрами
+// @Summary      Подсчёт общей стоимости подписок за период
+// @Description  Период задаётся включительно. Поддерживает фильтры по пользователю и сервису
+// @Tags         subscriptions
+// @Produce      json
+// @Param        start   query string true "Начало периода (YYYY-MM)" example(2025-01)
+// @Param        end     query string true "Конец периода (YYYY-MM)" example(2025-12)
+// @Param        user_id query string false "UUID пользователя" example(f47ac10b-58cc-4372-a567-0e02b2c3d479)
+// @Param        service  query string false "Название сервиса"
+// @Success      200 {object} dto.TotalCostResponse
+// @Failure      400,500 {object} map[string]string
+// @Router       /subscriptions/total [get]
+func (s *Server) sumSubscriptionsHandler(c *gin.Context) {
+	var req dto.TotalCostRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "некорректные параметры запроса", "details": err.Error()})
+		return
+	}
+
+	startYear, startMonth, err := parseYearMonth(req.Start)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "неверный формат параметра start: " + err.Error()})
+		return
+	}
+	endYear, endMonth, err := parseYearMonth(req.End)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "неверный формат параметра end: " + err.Error()})
+		return
+	}
+
+	userID := ""
+	if req.UserID != nil {
+		userID = *req.UserID
+	}
+	service := ""
+	if req.Service != nil {
+		service = *req.Service
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	total, err := s.DB.SumSubscriptionsCost(ctx, userID, service, startYear, startMonth, endYear, endMonth)
+	if err != nil {
+		log.Printf("ошибка подсчёта общей стоимости: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		return
+	}
+
+	log.Printf("подсчёт общей стоимости | %s..%s | user=%s | service=%s | total=%d₽", req.Start, req.End, userID, service, total)
+	c.JSON(http.StatusOK, dto.TotalCostResponse{Total: total})
+}
+
+
+--------------------------------------------------------------------------------
+
+internal/server/server_test.go
+// server_test.go
+// Расширение: .go
+
+// internal/server/server_test.go
+// Пакет server содержит интеграционные HTTP-тесты для REST API.
+// Тесты проверяют все ручки: создание, получение, обновление, удаление, список и подсчёт стоимости.
+// Используется в-memory база данных (настоящий PostgreSQL в тестовой БД).
+
+package server
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/maaw77/effm/config"
+	"github.com/maaw77/effm/internal/database"
+	"github.com/maaw77/effm/internal/dto"
+	"github.com/maaw77/effm/internal/models"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// setupTestServer создаёт сервер с подключением к тестовой БД и очищает таблицы
+func setupTestServer(t *testing.T) (*Server, *database.SubscriptionDatabase) {
+	connStr := config.InitConnString("config/config.yaml")
+
+	db, err := database.NewSubscriptionDatabase(context.Background(), connStr)
+	require.NoError(t, err, "не удалось подключиться к тестовой БД")
+
+	// ← ИСПРАВЛЕНО: RESTART, а не RESTAR
+	_, err = db.DBpool.Exec(context.Background(), "TRUNCATE TABLE subscriptions RESTART IDENTITY")
+	require.NoError(t, err, "не удалось очистить таблицу")
+
+	srv := NewServer(db)
+	gin.SetMode(gin.TestMode)
+	return srv, db
+}
+
+// TestCreateSubscription_OK проверяет успешное создание подписки
+func TestCreateSubscription_OK(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	reqBody := dto.CreateSubscriptionRequest{
+		ServiceName: "Yandex Plus",
+		Price:       499,
+		UserID:      uuid.New().String(),
+		YearMonth:   "2025-07",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/api/subscriptions", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.Router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+
+	// Правильная и надёжная проверка ответа
+	var resp struct {
+		ID string `json:"id"`
+	}
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	assert.NotEmpty(t, resp.ID)
+	assert.Len(t, resp.ID, 36, "ID должен быть валидным UUID (36 символов)")
+}
+
+// TestCreateSubscription_Conflict проверяет 409 при дубле
+func TestCreateSubscription_Conflict(t *testing.T) {
+	srv, db := setupTestServer(t)
+
+	userID := uuid.New().String()
+	sub := models.Subscription{
+		ServiceName: "Netflix",
+		Price:       999,
+		UserID:      userID,
+		Year:        2025,
+		Month:       8,
+	}
+	_, _ = db.Create(context.Background(), sub) // уже есть
+
+	reqBody := dto.CreateSubscriptionRequest{
+		ServiceName: "Netflix",
+		Price:       999,
+		UserID:      userID,
+		YearMonth:   "2025-08",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/api/subscriptions", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.Router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	assert.Contains(t, w.Body.String(), "уже существует")
+}
+
+// TestGetSubscription_OK проверяет получение по ID
+func TestGetSubscription_OK(t *testing.T) {
+	srv, db := setupTestServer(t)
+
+	sub := models.Subscription{
+		ServiceName: "Spotify",
+		Price:       169,
+		UserID:      uuid.New().String(),
+		Year:        2025,
+		Month:       9,
+	}
+	id, _ := db.Create(context.Background(), sub)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/api/subscriptions/"+id, nil)
+	srv.Router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Spotify")
+	assert.Contains(t, w.Body.String(), "2025-09")
+}
+
+// TestUpdateSubscription_OK проверяет обновление
+func TestUpdateSubscription_OK(t *testing.T) {
+	srv, db := setupTestServer(t)
+
+	sub := models.Subscription{
+		ServiceName: "YouTube Premium",
+		Price:       249,
+		UserID:      uuid.New().String(),
+		Year:        2025,
+		Month:       10,
+	}
+	id, _ := db.Create(context.Background(), sub)
+
+	update := dto.UpdateSubscriptionRequest{
+		Price:       new(int),
+		ServiceName: new(string),
+	}
+	*update.Price = 299
+	*update.ServiceName = "YouTube Premium Family"
+
+	body, _ := json.Marshal(update)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/api/subscriptions/"+id, bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.Router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Проверяем, что цена изменилась
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("GET", "/api/subscriptions/"+id, nil)
+	srv.Router.ServeHTTP(w, req)
+	assert.Contains(t, w.Body.String(), "299")
+	assert.Contains(t, w.Body.String(), "Family")
+}
+
+// TestDeleteSubscription_OK проверяет удаление
+func TestDeleteSubscription_OK(t *testing.T) {
+	srv, db := setupTestServer(t)
+
+	sub := models.Subscription{
+		ServiceName: "Apple Music",
+		Price:       169,
+		UserID:      uuid.New().String(),
+		Year:        2025,
+		Month:       11,
+	}
+	id, _ := db.Create(context.Background(), sub)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("DELETE", "/api/subscriptions/"+id, nil)
+	srv.Router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Должна быть 404
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("GET", "/api/subscriptions/"+id, nil)
+	srv.Router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// TestListSubscriptions проверяет список
+func TestListSubscriptions(t *testing.T) {
+	srv, db := setupTestServer(t)
+
+	userID := uuid.New().String()
+	for i := 1; i <= 3; i++ {
+		sub := models.Subscription{
+			ServiceName: "TestService",
+			Price:       100 + i*100,
+			UserID:      userID,
+			Year:        2025,
+			Month:       i,
+		}
+		db.Create(context.Background(), sub)
+	}
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/api/subscriptions?user_id="+userID, nil)
+	srv.Router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp []dto.SubscriptionResponse
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Len(t, resp, 3)
+}
+
+// TestSumSubscriptionsCost — самый важный тест!
+func TestSumSubscriptionsCost(t *testing.T) {
+	srv, db := setupTestServer(t)
+
+	userID := uuid.New().String()
+	subs := []models.Subscription{
+		{ServiceName: "A", Price: 500, UserID: userID, Year: 2025, Month: 1},
+		{ServiceName: "B", Price: 600, UserID: userID, Year: 2025, Month: 2},
+		{ServiceName: "A", Price: 700, UserID: userID, Year: 2025, Month: 3},
+	}
+	for _, s := range subs {
+		db.Create(context.Background(), s)
+	}
+
+	tests := []struct {
+		name     string
+		start    string
+		end      string
+		expected int
+	}{
+		{"весь 2025", "2025-01", "2025-12", 1800},
+		{"только сервис A", "2025-01", "2025-12", 1200},
+		{"февраль 2025", "2025-02", "2025-02", 600},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := "/api/subscriptions/total?start=" + tt.start + "&end=" + tt.end
+			if tt.name == "только сервис A" {
+				url += "&service=A"
+			}
+
+			w := httptest.NewRecorder()
+			req, _ := http.NewRequest("GET", url, nil)
+			srv.Router.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusOK, w.Code)
+			var resp dto.TotalCostResponse
+			json.Unmarshal(w.Body.Bytes(), &resp)
+			assert.Equal(t, tt.expected, resp.Total)
+		})
+	}
+}
+
+
+--------------------------------------------------------------------------------
+
+migrations/000001_extensions.down.sql
+// 000001_extensions.down.sql
+// Расширение: .sql
+
+DROP EXTENSION IF EXISTS "uuid-ossp";
+
+--------------------------------------------------------------------------------
+
+migrations/000001_extensions.up.sql
+// 000001_extensions.up.sql
+// Расширение: .sql
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+--------------------------------------------------------------------------------
+
+migrations/000002_init.down.sql
+// 000002_init.down.sql
+// Расширение: .sql
+
+DROP TABLE IF EXISTS subscriptions;
+
+--------------------------------------------------------------------------------
+
+migrations/000002_init.up.sql
+// 000002_init.up.sql
+// Расширение: .sql
+
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    service_name TEXT NOT NULL,
+    price INT NOT NULL CHECK (price >= 0),
+    user_id UUID NOT NULL,
+    year INT NOT NULL CHECK (year >= 2000 AND year <= 2100),
+    month INT NOT NULL CHECK (month BETWEEN 1 AND 12),
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE(user_id, service_name, year, month)
+);
+
+CREATE INDEX IF NOT EXISTS idx_subscriptions_user_year_month 
+    ON subscriptions(user_id, year, month);
+
+CREATE INDEX IF NOT EXISTS idx_subscriptions_service_year_month 
+    ON subscriptions(service_name, year, month);
+
+CREATE INDEX IF NOT EXISTS idx_subscriptions_year_month 
+    ON subscriptions(year, month);
+
+--------------------------------------------------------------------------------
+
