@@ -39,38 +39,43 @@ jobs:
         go-version: ${{ env.GO_VERSION }}
         cache: true
 
-    - name: Create config directory
-      run: mkdir -p config
+    # - name: Create config directory
+    #   run: mkdir -p config
 
-    - name: Create test config
-      run: |
-        cat > config/config.yaml << 'EOF'
-        db:
-          DB: "postgres"
-          User: "postgres"
-          Password: "epas"
-          Host: "localhost"
-          Port: 5432
-          PoolMaxConns: 10
+    # - name: Create test config for CI
+    #   run: |
+    #     cat > config/config.yaml << 'EOF'
+    #     db:
+    #       DB: "postgres"
+    #       User: "postgres"
+    #       Password: "epas"
+    #       Host: "localhost"
+    #       Port: 5432
+    #       PoolMaxConns: 10
 
-        server:
-          Port: "8080"
-          ReadTimeout: 5s
-          WriteTimeout: 5s
-        EOF
+    #     server:
+    #       Port: "8080"
+    #       ReadTimeout: 5s
+    #       WriteTimeout: 5s
+    #     EOF
 
     - name: Wait for PostgreSQL
       run: |
-        for i in {1..10}; do
+        for i in {1..15}; do
           pg_isready -h localhost -p 5432 -U postgres && break
-          echo "Waiting for PostgreSQL... ($i/10)"
+          echo "Waiting for PostgreSQL... ($i/15)"
           sleep 2
         done
 
     - name: Run migrations
       run: |
         go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+        sleep 3
         migrate -path migrations -database "postgres://postgres:epas@localhost:5432/postgres?sslmode=disable" up
+
+    - name: Build the application
+      run: |
+        go build -v ./cmd/server
 
     - name: Run tests
       run: |
