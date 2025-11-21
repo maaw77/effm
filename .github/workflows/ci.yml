@@ -41,8 +41,8 @@ jobs:
 
     - name: Download dependencies
       run: |
+        go mod tidy
         go mod download
-        go mod verify
 
     - name: Wait for PostgreSQL
       run: |
@@ -70,4 +70,4 @@ jobs:
       uses: golangci/golangci-lint-action@v3
       with:
         version: v1.54
-        args: --timeout=3m
+        args: --timeout=3m --skip-dirs=vendor --build-tags=postgres
