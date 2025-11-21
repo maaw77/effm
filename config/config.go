@@ -16,13 +16,13 @@ import (
 func InitConnString(pathConfig string) string {
 	dir, file := filepath.Split(pathConfig)
 	fileName := strings.Split(file, ".")[0]
-
+	log.Println("PathConf:", pathConfig)
 	// значения по умолчанию
 	viper.SetDefault("db.DB", "postgres")
 	viper.SetDefault("db.User", "postgres")
 	viper.SetDefault("db.Password", "epas")
 	viper.SetDefault("db.Host", "localhost")
-	viper.SetDefault("db.Port", 5433)
+	viper.SetDefault("db.Port", 5432)
 	viper.SetDefault("db.PoolMaxConns", 10)
 
 	viper.SetConfigName(fileName)
@@ -52,6 +52,7 @@ func InitConnString(pathConfig string) string {
 		viper.GetString("db.DB"),
 		viper.GetInt("db.PoolMaxConns"),
 	)
+	log.Println(viper.GetString("db.Host"))
 
 	return connString
 }

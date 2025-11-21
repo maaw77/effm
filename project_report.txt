@@ -3,6 +3,96 @@
 Исключенные директории: vendor, node_modules, .git, cmd/scanner
 ================================================================================
 
+.github/workflows/ci.yml
+// ci.yml
+// Расширение: .yml
+
+name: CI
+
+on:
+  push:
+    branches: [ main, hw, home_v1 ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  GO_VERSION: '1.25.4'
+
+jobs:
+  test-and-lint:
+    name: Test and Lint
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: epas
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+
+    - name: Create config directory
+      run: mkdir -p config
+
+    - name: Create test config
+      run: |
+        cat > config/config.yaml << 'EOF'
+        db:
+          DB: "postgres"
+          User: "postgres"
+          Password: "epas"
+          Host: "localhost"
+          Port: 5432
+          PoolMaxConns: 10
+
+        server:
+          Port: "8080"
+          ReadTimeout: 5s
+          WriteTimeout: 5s
+        EOF
+
+    - name: Wait for PostgreSQL
+      run: |
+        for i in {1..10}; do
+          pg_isready -h localhost -p 5432 -U postgres && break
+          echo "Waiting for PostgreSQL... ($i/10)"
+          sleep 2
+        done
+
+    - name: Run migrations
+      run: |
+        go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+        migrate -path migrations -database "postgres://postgres:epas@localhost:5432/postgres?sslmode=disable" up
+
+    - name: Run tests
+      run: |
+        go test -v -race ./... -timeout 3m
+
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v3
+      with:
+        version: v1.54
+        args: --timeout=3m
+
+--------------------------------------------------------------------------------
+
 .golangci.yml
 // .golangci.yml
 // Расширение: .yml
@@ -169,13 +259,13 @@ import (
 func InitConnString(pathConfig string) string {
 	dir, file := filepath.Split(pathConfig)
 	fileName := strings.Split(file, ".")[0]
-
+	log.Println("PathConf:", pathConfig)
 	// значения по умолчанию
 	viper.SetDefault("db.DB", "postgres")
 	viper.SetDefault("db.User", "postgres")
 	viper.SetDefault("db.Password", "epas")
 	viper.SetDefault("db.Host", "localhost")
-	viper.SetDefault("db.Port", 5433)
+	viper.SetDefault("db.Port", 5432)
 	viper.SetDefault("db.PoolMaxConns", 10)
 
 	viper.SetConfigName(fileName)
@@ -205,6 +295,7 @@ func InitConnString(pathConfig string) string {
 		viper.GetString("db.DB"),
 		viper.GetInt("db.PoolMaxConns"),
 	)
+	log.Println(viper.GetString("db.Host"))
 
 	return connString
 }
@@ -283,7 +374,7 @@ import (
 )
 
 func TestInitConnString_Defaults(t *testing.T) {
-	expected := "postgres://postgres:epas@localhost:5433/postgres?sslmode=disable&pool_max_conns=10"
+	expected := "postgres://postgres:epas@localhost:5432/postgres?sslmode=disable&pool_max_conns=10"
 
 	connString := InitConnString("")
 	if connString != expected {
@@ -304,7 +395,7 @@ func TestInitConnString_File(t *testing.T) {
 	}
 
 	// Подставляем значения из твоего config.yaml
-	expected := "postgres://postgres:epas@localhost:5433/postgres?sslmode=disable&pool_max_conns=10"
+	expected := "postgres://postgres:epas@db:5432/postgres?sslmode=disable&pool_max_conns=10"
 
 	connString := InitConnString(configPath)
 	if connString != expected {
