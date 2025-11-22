@@ -28,7 +28,7 @@ func TestInitConnString_File(t *testing.T) {
 	}
 
 	// Подставляем значения из твоего config.yaml
-	expected := "postgres://postgres:epas@localhost:5433/postgres?sslmode=disable&pool_max_conns=10"
+	expected := "postgres://postgres:epas@db:5432/postgres?sslmode=disable&pool_max_conns=10"
 
 	connString := InitConnString(configPath)
 	if connString != expected {
