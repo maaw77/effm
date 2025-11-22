@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/maaw77/effm/config"
+	"github.com/maaw77/effm/docs"
 	"github.com/maaw77/effm/internal/database"
 	"github.com/maaw77/effm/internal/server"
 
@@ -39,6 +40,14 @@ import (
 // Конфигурация загружается из config/config.yaml или использует значения по умолчанию.
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+
+	// Настройка Swagger перед запуском сервера
+	docs.SwaggerInfo.Host = "localhost:8080"
+	docs.SwaggerInfo.BasePath = "/api"
+	docs.SwaggerInfo.Schemes = []string{"http"}
+	docs.SwaggerInfo.Title = "EFFM API"
+	docs.SwaggerInfo.Description = "API для управления подписками"
+	docs.SwaggerInfo.Version = "1.0"
 
 	// Инициализация подключения к базе данных
 	connStr := config.InitConnString("config/config.yaml")

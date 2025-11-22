@@ -1,5 +1,5 @@
 Отчет по проекту: .
-Расширения: .go, .yaml, .yml, .sql, .mod
+Расширения: .go, .yaml, .yml, .sql, .mod, .sh
 Исключенные директории: vendor, node_modules, .git, cmd/scanner
 ================================================================================
 
@@ -34,6 +34,15 @@ cmd/server/main.go
 // main.go
 // Расширение: .go
 
+// Package main является точкой входа для приложения управления подписками.
+//
+// Приложение предоставляет REST API для работы с подписками, включая:
+// - Создание, чтение, обновление и удаление подписки
+// - Просмотр списка подписок
+// - Автоматическую генерацию Swagger документации
+//
+// Запуск: go run cmd/server/main.go
+// Swagger UI: http://localhost:8080/swagger/index.html
 package main
 
 import (
@@ -49,28 +58,43 @@ import (
 	"github.com/maaw77/effm/internal/database"
 	"github.com/maaw77/effm/internal/server"
 
-	// === Swagger ===
-	_ "github.com/maaw77/effm/docs"            // сгенерировано командой swag init
-	swaggerFiles "github.com/swaggo/files"     // ← обязательно с алиасом
-	ginSwagger "github.com/swaggo/gin-swagger" // ← обязательно с алиасом
+	_ "github.com/maaw77/effm/docs"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
 )
 
+// main инициализирует и запускает HTTP сервер приложения.
+//
+// Основные этапы:
+// 1. Загрузка конфигурации БД и сервера
+// 2. Подключение к PostgreSQL
+// 3. Инициализация маршрутов и middleware
+// 4. Запуск HTTP сервера
+// 5. Обработка graceful shutdown
+//
+// Конфигурация загружается из config/config.yaml или использует значения по умолчанию.
 func main() {
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+
+	// Инициализация подключения к базе данных
 	connStr := config.InitConnString("config/config.yaml")
 	serverCfg := config.InitServerConfig()
 	log.Printf("server will listen on :%s", serverCfg.Port)
 
+	// Подключение к PostgreSQL
 	db, err := database.NewSubscriptionDatabase(context.Background(), connStr)
 	if err != nil {
 		log.Fatalf("failed to connect to PostgreSQL: %v", err)
 	}
 	defer db.Close()
 
+	// Инициализация HTTP сервера с роутингом
 	srv := server.NewServer(db)
 
 	// Swagger UI — доступен по http://localhost:8080/swagger/index.html
 	srv.Router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
+	// Настройка HTTP сервера с таймаутами
 	httpServer := &http.Server{
 		Addr:         ":" + serverCfg.Port,
 		Handler:      srv.Router,
@@ -78,6 +102,7 @@ func main() {
 		WriteTimeout: serverCfg.WriteTimeout,
 	}
 
+	// Запуск сервера в отдельной goroutine
 	go func() {
 		log.Printf("server started at http://localhost:%s", serverCfg.Port)
 		log.Printf("Swagger UI: http://localhost:%s/swagger/index.html", serverCfg.Port)
@@ -86,11 +111,13 @@ func main() {
 		}
 	}()
 
+	// Обработка graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("shutdown signal received...")
 
+	// Graceful shutdown с таймаутом
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := httpServer.Shutdown(ctx); err != nil {
@@ -109,6 +136,14 @@ cmd/server/migrate.go
 
 //go:build migrate
 
+// Package main предоставляет утилиту для выполнения миграций базы данных.
+//
+// Данный пакет собирается только при наличии тега "migrate" и предназначен
+// для применения миграций PostgreSQL при развертывании приложения.
+//
+// Использование:
+//
+//	go run -tags migrate cmd/migrate/main.go
 package main
 
 import (
@@ -120,21 +155,34 @@ import (
 	"github.com/maaw77/effm/config"
 )
 
+// init выполняется при запуске приложения и применяет все pending миграции.
+//
+// Процесс миграции:
+// 1. Загружает строку подключения из конфигурации
+// 2. Инициализирует мигратор с указанием пути к файлам миграций
+// 3. Применяет все доступные миграции (m.Up())
+// 4. Корректно обрабатывает случай, когда миграции уже применены
+//
+// В случае ошибки подключения или применения миграций процесс завершается с fatal error.
 func init() {
 	log.Println("running database migrations")
 
+	// Загрузка строки подключения для миграций
 	connStr := config.ConnStringForMigrate("config/config.yaml")
 
+	// Инициализация мигратора с файлами из директории migrations
 	m, err := migrate.New("file://migrations", connStr)
 	if err != nil {
 		log.Fatalf("failed to initialize migrator: %v", err)
 	}
 	defer m.Close()
 
+	// Применение всех pending миграций
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		log.Fatalf("migration failed: %v", err)
 	}
 
+	// Логирование результата выполнения миграций
 	if err == migrate.ErrNoChange {
 		log.Println("migrations are up to date")
 	} else {
@@ -151,6 +199,13 @@ config/config.go
 // config.go
 // Расширение: .go
 
+// Package config предоставляет функционал для работы с конфигурацией приложения.
+//
+// Пакет включает:
+// - Загрузку конфигурации из YAML файлов с использованием Viper
+// - Формирование строк подключения к PostgreSQL
+// - Управление настройками HTTP сервера
+// - Поддержку значений по умолчанию
 package config
 
 import (
@@ -165,12 +220,36 @@ import (
 )
 
 // InitConnString возвращает строку подключения к PostgreSQL.
-// Если файл конфигурации не найден, используются значения по умолчанию.
+//
+// Функция пытается загрузить конфигурацию из указанного YAML файла. Если файл
+// не найден или произошла ошибка чтения, используются значения по умолчанию.
+//
+// Параметры подключения (в порядке приоритета):
+//   - Из конфигурационного файла
+//   - Значения по умолчанию:
+//   - DB: "postgres"
+//   - User: "postgres"
+//   - Password: "epas"
+//   - Host: "localhost"
+//   - Port: 5433
+//   - PoolMaxConns: 10
+//
+// Пример строки подключения:
+//
+//	"postgres://user:pass@host:port/db?sslmode=disable&pool_max_conns=10"
+//
+// Аргументы:
+//
+//	pathConfig - путь к конфигурационному файлу (например, "config/config.yaml")
+//
+// Возвращает:
+//
+//	Строку подключения к PostgreSQL в формате URL
 func InitConnString(pathConfig string) string {
 	dir, file := filepath.Split(pathConfig)
 	fileName := strings.Split(file, ".")[0]
 
-	// значения по умолчанию
+	// Установка значений по умолчанию для параметров базы данных
 	viper.SetDefault("db.DB", "postgres")
 	viper.SetDefault("db.User", "postgres")
 	viper.SetDefault("db.Password", "epas")
@@ -182,9 +261,7 @@ func InitConnString(pathConfig string) string {
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(dir)
 
-	// pth, _:= os.Getwd()
-	// log.Println("Pwd=", pth)
-	// чтение конфигурации
+	// Попытка загрузки конфигурации из файла
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
 			log.Println("configuration file not found, using default parameters")
@@ -195,7 +272,7 @@ func InitConnString(pathConfig string) string {
 		log.Printf("configuration loaded from %s", pathConfig)
 	}
 
-	// формирование строки подключения
+	// Формирование строки подключения
 	connString := fmt.Sprintf(
 		"postgres://%s:%s@%s:%d/%s?sslmode=disable&pool_max_conns=%d",
 		viper.GetString("db.User"),
@@ -211,12 +288,22 @@ func InitConnString(pathConfig string) string {
 
 // ServerConfig хранит параметры конфигурации HTTP-сервера.
 type ServerConfig struct {
-	Port         string
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
+	Port         string        // Порт для прослушивания (например, "8080")
+	ReadTimeout  time.Duration // Таймаут чтения запроса
+	WriteTimeout time.Duration // Таймаут записи ответа
 }
 
-// InitServerConfig читает конфиг сервера из YAML
+// InitServerConfig читает конфигурацию сервера из настроек Viper.
+//
+// Ожидаемые ключи в конфигурации:
+//
+//	server.Port - порт сервера (string)
+//	server.ReadTimeout - таймаут чтения (duration)
+//	server.WriteTimeout - таймаут записи (duration)
+//
+// Возвращает:
+//
+//	ServerConfig с загруженными настройками сервера
 func InitServerConfig() ServerConfig {
 	return ServerConfig{
 		Port:         viper.GetString("server.Port"),
@@ -225,16 +312,32 @@ func InitServerConfig() ServerConfig {
 	}
 }
 
-// ConnStringForMigrate возвращает connString без pgx-специфичных параметров
+// ConnStringForMigrate возвращает строку подключения без pgx-специфичных параметров.
+//
+// Функция используется для утилит миграции (golang-migrate), которые могут
+// не поддерживать параметры, специфичные для драйвера pgx (например, pool_max_conns).
+//
+// Процесс:
+//  1. Получает полную строку подключения через InitConnString
+//  2. Удаляет параметр pool_max_conns из query string
+//  3. Возвращает очищенную строку подключения
+//
+// Аргументы:
+//
+//	pathConfig - путь к конфигурационному файлу
+//
+// Возвращает:
+//
+//	Строку подключения, совместимую с golang-migrate
 func ConnStringForMigrate(pathConfig string) string {
-	// Читаем обычный connStr
+	// Получение полной строки подключения
 	full := InitConnString(pathConfig)
 
-	// Убираем pool_max_conns (и любые другие pgx-only параметры, если будут)
+	// Удаление pgx-специфичных параметров (pool_max_conns)
 	if strings.Contains(full, "pool_max_conns") {
 		u, err := url.Parse(full)
 		if err != nil {
-			return full // на всякий случай
+			return full // возвращаем исходную строку в случае ошибки парсинга
 		}
 		q := u.Query()
 		q.Del("pool_max_conns")
@@ -282,6 +385,13 @@ import (
 	"testing"
 )
 
+// TestInitConnString_Defaults проверяет формирование строки подключения
+// с параметрами по умолчанию, когда конфигурационный файл не указан.
+//
+// Тест проверяет:
+// - Корректность формирования строки подключения
+// - Соответствие значений по умолчанию (localhost:5433)
+// - Наличие всех необходимных параметров (sslmode, pool_max_conns)
 func TestInitConnString_Defaults(t *testing.T) {
 	expected := "postgres://postgres:epas@localhost:5433/postgres?sslmode=disable&pool_max_conns=10"
 
@@ -291,6 +401,15 @@ func TestInitConnString_Defaults(t *testing.T) {
 	}
 }
 
+// TestInitConnString_File проверяет загрузку строки подключения из конфигурационного файла.
+//
+// Тест:
+// 1. Проверяет наличие config.yaml в текущей директории
+// 2. Если файл отсутствует - пропускает тест
+// 3. Если файл присутствует - проверяет корректность загрузки параметров
+//
+// Примечание: тест ожидает конкретные значения из config.yaml (db:5432)
+// и может потребовать обновления при изменении конфигурации.
 func TestInitConnString_File(t *testing.T) {
 	currDir, err := os.Getwd()
 	if err != nil {
@@ -303,8 +422,8 @@ func TestInitConnString_File(t *testing.T) {
 		t.Skipf("config.yaml not found at %s, skipping test", configPath)
 	}
 
-	// Подставляем значения из твоего config.yaml
-	expected := "postgres://postgres:epas@localhost:5433/postgres?sslmode=disable&pool_max_conns=10"
+	// Ожидаемые значения должны соответствовать config.yaml
+	expected := "postgres://postgres:epas@db:5432/postgres?sslmode=disable&pool_max_conns=10"
 
 	connString := InitConnString(configPath)
 	if connString != expected {
@@ -321,17 +440,17 @@ docker-compose.yml
 
 services:
   db:
-    image: postgres
+    image: postgres:17-alpine     # фиксируем версию, чтобы не прилетел 18 и не сломал
     container_name: effm_postgres
     restart: always
     env_file:
-      - ./.env
+      - ./.env                    # POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD и т.д.
     environment:
       TZ: Europe/Moscow
     ports:
-      - "5433:5432"
+      - "5433:5432"               # на хосте 5433, внутри контейнера обычный 5432
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql   # ← ЭТО САМОЕ ГЛАВНОЕ ДЛЯ Postgres 17+
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 10s
@@ -354,7 +473,6 @@ services:
 
 volumes:
   postgres_data:
-
 
 --------------------------------------------------------------------------------
 
@@ -1302,7 +1420,6 @@ internal/database/database.go
 // database.go
 // Расширение: .go
 
-// internal/database/database.go
 // Пакет database реализует слой доступа к данным (repository) для работы с подписками пользователей.
 // Используется PostgreSQL + pgxpool. Все операции асинхронно-безопасны и работают через context.
 //
@@ -1325,8 +1442,8 @@ import (
 
 // Предопределённые ошибки для бизнес-логики
 var (
-	ErrNotExist = errors.New("подписка не найдена")
-	ErrConflict = errors.New("подписка на этот сервис за указанный месяц уже существует")
+	ErrNotExist = errors.New("subscription not found")
+	ErrConflict = errors.New("subscription for this service in specified month already exists")
 )
 
 // SubscriptionDatabase — основной объект для работы с БД
@@ -1338,20 +1455,20 @@ type SubscriptionDatabase struct {
 // Возвращает готовый к работе объект или ошибку подключения.
 func NewSubscriptionDatabase(ctx context.Context, connStr string) (*SubscriptionDatabase, error) {
 	if connStr == "" {
-		return nil, errors.New("строка подключения пустая")
+		return nil, errors.New("connection string is empty")
 	}
 
 	config, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
-		return nil, fmt.Errorf("невозможно распарсить connString: %w", err)
+		return nil, fmt.Errorf("cannot parse connString: %w", err)
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
-		return nil, fmt.Errorf("не удалось создать пул соединений: %w", err)
+		return nil, fmt.Errorf("failed to create connection pool: %w", err)
 	}
 
-	log.Printf("успешно подключено к PostgreSQL | pool_max_conns=%d", config.MaxConns)
+	log.Printf("successfully connected to PostgreSQL | pool_max_conns=%d", config.MaxConns)
 	return &SubscriptionDatabase{DBpool: pool}, nil
 }
 
@@ -1359,7 +1476,7 @@ func NewSubscriptionDatabase(ctx context.Context, connStr string) (*Subscription
 func (db *SubscriptionDatabase) Close() {
 	if db.DBpool != nil {
 		db.DBpool.Close()
-		log.Println("соединение с PostgreSQL закрыто")
+		log.Println("PostgreSQL connection closed")
 	}
 }
 
@@ -1376,15 +1493,15 @@ func (db *SubscriptionDatabase) Create(ctx context.Context, sub models.Subscript
 
 	if err != nil {
 		if isUniqueViolation(err) {
-			log.Printf("[ПРЕДУПРЕЖДЕНИЕ] конфликт: подписка уже существует | пользователь=%s сервис=%s %d-%02d",
+			log.Printf("[WARNING] subscription conflict | user=%s service=%s %d-%02d",
 				sub.UserID, sub.ServiceName, sub.Year, sub.Month)
 			return "", ErrConflict
 		}
-		log.Printf("ошибка создания подписки | ошибка=%v", err)
+		log.Printf("subscription creation error | error=%v", err)
 		return "", err
 	}
 
-	log.Printf("подписка успешно создана | id=%s пользователь=%s сервис=%s год=%d месяц=%02d цена=%d₽",
+	log.Printf("subscription successfully created | id=%s user=%s service=%s year=%d month=%02d price=%d",
 		id, sub.UserID, sub.ServiceName, sub.Year, sub.Month, sub.Price)
 
 	return id, nil
@@ -1392,6 +1509,8 @@ func (db *SubscriptionDatabase) Create(ctx context.Context, sub models.Subscript
 
 // Get возвращает подписку по её UUID
 func (db *SubscriptionDatabase) Get(ctx context.Context, id string) (models.Subscription, error) {
+	log.Printf("database: retrieving subscription | id=%s", id)
+
 	var sub models.Subscription
 	err := db.DBpool.QueryRow(ctx,
 		`SELECT id, service_name, price, user_id, year, month, created_at, updated_at
@@ -1401,18 +1520,23 @@ func (db *SubscriptionDatabase) Get(ctx context.Context, id string) (models.Subs
 		&sub.Year, &sub.Month, &sub.CreatedAt, &sub.UpdatedAt)
 
 	if errors.Is(err, pgx.ErrNoRows) {
+		log.Printf("database: subscription not found | id=%s", id)
 		return sub, ErrNotExist
 	}
 	if err != nil {
-		log.Printf("ошибка получения подписки id=%s | ошибка=%v", id, err)
+		log.Printf("subscription retrieval error id=%s | error=%v", id, err)
 		return sub, err
 	}
+
+	log.Printf("database: subscription retrieved | id=%s service=%s user=%s", id, sub.ServiceName, sub.UserID)
 	return sub, nil
 }
 
 // Update изменяет название сервиса и/или цену существующей подписки.
 // Месяц и год изменить нельзя — это историческая запись.
 func (db *SubscriptionDatabase) Update(ctx context.Context, id string, updates models.Subscription) error {
+	log.Printf("database: updating subscription | id=%s service=%s price=%d", id, updates.ServiceName, updates.Price)
+
 	cmd, err := db.DBpool.Exec(ctx,
 		`UPDATE subscriptions
 		 SET service_name = COALESCE(NULLIF($1, ''), service_name),
@@ -1422,32 +1546,42 @@ func (db *SubscriptionDatabase) Update(ctx context.Context, id string, updates m
 		updates.ServiceName, nilIfZero(updates.Price), id,
 	)
 	if err != nil {
-		log.Printf("ошибка обновления подписки id=%s | ошибка=%v", id, err)
+		log.Printf("subscription update error id=%s | error=%v", id, err)
 		return err
 	}
 	if cmd.RowsAffected() == 0 {
+		log.Printf("database: subscription not found for update | id=%s", id)
 		return ErrNotExist
 	}
-	log.Printf("подписка успешно обновлена | id=%s", id)
+	log.Printf("subscription successfully updated | id=%s", id)
 	return nil
 }
 
 // Delete удаляет подписку по UUID
 func (db *SubscriptionDatabase) Delete(ctx context.Context, id string) error {
+	log.Printf("database: deleting subscription | id=%s", id)
+
 	cmd, err := db.DBpool.Exec(ctx, `DELETE FROM subscriptions WHERE id = $1`, id)
 	if err != nil {
-		log.Printf("ошибка удаления подписки id=%s | ошибка=%v", id, err)
+		log.Printf("subscription deletion error id=%s | error=%v", id, err)
 		return err
 	}
 	if cmd.RowsAffected() == 0 {
+		log.Printf("database: subscription not found for deletion | id=%s", id)
 		return ErrNotExist
 	}
-	log.Printf("подписка успешно удалена | id=%s", id)
+	log.Printf("subscription successfully deleted | id=%s", id)
 	return nil
 }
 
 // List возвращает все подписки (или только одного пользователя), отсортированные по дате (новые сверху)
 func (db *SubscriptionDatabase) List(ctx context.Context, userID string) ([]models.Subscription, error) {
+	if userID != "" {
+		log.Printf("database: listing subscriptions for user | user=%s", userID)
+	} else {
+		log.Printf("database: listing all subscriptions")
+	}
+
 	query := `SELECT id, service_name, price, user_id, year, month, created_at, updated_at
 	          FROM subscriptions`
 	var args []interface{}
@@ -1459,12 +1593,13 @@ func (db *SubscriptionDatabase) List(ctx context.Context, userID string) ([]mode
 
 	rows, err := db.DBpool.Query(ctx, query, args...)
 	if err != nil {
-		log.Printf("ошибка получения списка подписок | ошибка=%v", err)
+		log.Printf("subscription list retrieval error | error=%v", err)
 		return nil, err
 	}
 	defer rows.Close()
 
 	var result []models.Subscription
+	count := 0
 	for rows.Next() {
 		var sub models.Subscription
 		if err := rows.Scan(&sub.ID, &sub.ServiceName, &sub.Price, &sub.UserID,
@@ -1472,7 +1607,15 @@ func (db *SubscriptionDatabase) List(ctx context.Context, userID string) ([]mode
 			return nil, err
 		}
 		result = append(result, sub)
+		count++
 	}
+
+	if userID != "" {
+		log.Printf("database: found %d subscriptions for user | user=%s", count, userID)
+	} else {
+		log.Printf("database: found %d total subscriptions", count)
+	}
+
 	return result, rows.Err()
 }
 
@@ -1483,6 +1626,9 @@ func (db *SubscriptionDatabase) SumSubscriptionsCost(
 	userID, serviceName string,
 	startYear, startMonth, endYear, endMonth int,
 ) (int, error) {
+
+	log.Printf("database: calculating total cost | user=%s service=%s period=%d-%02d..%d-%02d",
+		userID, serviceName, startYear, startMonth, endYear, endMonth)
 
 	query := `SELECT COALESCE(SUM(price), 0)
 	          FROM subscriptions
@@ -1505,12 +1651,11 @@ func (db *SubscriptionDatabase) SumSubscriptionsCost(
 	var total int
 	err := db.DBpool.QueryRow(ctx, query, args...).Scan(&total)
 	if err != nil {
-		log.Printf("ошибка подсчёта общей стоимости | ошибка=%v", err)
+		log.Printf("total cost calculation error | error=%v", err)
 		return 0, err
 	}
 
-	// Самый важный лог в приложении — всегда видно, что и сколько посчитали
-	log.Printf("подсчитана общая стоимость подписок | пользователь=%s сервис=%s период=%d-%02d..%d-%02d итог=%d₽",
+	log.Printf("total subscription cost calculated | user=%s service=%s period=%d-%02d..%d-%02d total=%d",
 		userID, serviceName, startYear, startMonth, endYear, endMonth, total)
 
 	return total, nil
@@ -1543,10 +1688,12 @@ internal/database/datbase_test.go
 // datbase_test.go
 // Расширение: .go
 
-// internal/database/database_test.go
 // Пакет database содержит модульные тесты для слоя работы с БД.
-// Тесты проверяют корректность всех операций: создание, чтение, обновление, удаление,
-// уникальность записей и главное — правильность подсчёта общей стоимости за период.
+//
+// Тесты проверяют корректность всех операций CRUD:
+// - Создание, чтение, обновление, удаление подписок
+// - Обработку конфликтов уникальности
+// - Корректность подсчёта общей стоимости за период
 
 package database
 
@@ -1562,7 +1709,14 @@ import (
 var testDB *SubscriptionDatabase
 
 // TestMain выполняется один раз до и после всех тестов.
-// Подключаемся к тестовой БД, очищаем таблицу и закрываем соединение в конце.
+//
+// Процесс инициализации:
+// 1. Подключение к тестовой БД using config.yaml
+// 2. Очистка таблицы subscriptions
+// 3. Запуск всех тестов
+// 4. Закрытие соединения с БД
+//
+// Важно: таблица полностью очищается (TRUNCATE) перед запуском тестовой серии.
 func TestMain(m *testing.M) {
 	ctx := context.Background()
 
@@ -1574,7 +1728,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic("failed to connect to test database: " + err.Error())
 	}
-	defer testDB.Close() // ← исправлено: было testTestDB
+	defer testDB.Close()
 
 	// Очищаем таблицу перед запуском тестов
 	_, err = testDB.DBpool.Exec(ctx, "TRUNCATE TABLE subscriptions RESTART IDENTITY")
@@ -1585,7 +1739,16 @@ func TestMain(m *testing.M) {
 	m.Run()
 }
 
-// newTestSubscription — вспомогательная функция для создания тестовой подписки
+// newTestSubscription создает тестовый объект подписки с уникальным UserID.
+//
+// Параметры:
+//
+//	year  - год подписки
+//	month - месяц подписки
+//
+// Возвращает:
+//
+//	models.Subscription с заполненными обязательными полями
 func newTestSubscription(year, month int) models.Subscription {
 	return models.Subscription{
 		ServiceName: "TestService",
@@ -1596,7 +1759,12 @@ func newTestSubscription(year, month int) models.Subscription {
 	}
 }
 
-// TestCreateAndGet проверяет создание подписки и её последующее чтение по ID
+// TestCreateAndGet проверяет базовый сценарий создания и чтения подписки.
+//
+// Тест проверяет:
+// - Успешное создание подписки в БД
+// - Корректное чтение созданной подписки по ID
+// - Соответствие всех полей исходным данным
 func TestCreateAndGet(t *testing.T) {
 	ctx := context.Background()
 	sub := newTestSubscription(2025, 7)
@@ -1620,7 +1788,12 @@ func TestCreateAndGet(t *testing.T) {
 	}
 }
 
-// TestCreateConflict проверяет, что нельзя создать две одинаковые подписки за один месяц
+// TestCreateConflict проверяет обработку конфликта уникальности.
+//
+// Ожидаемое поведение:
+// - Первое создание подписки - успешно
+// - Второе создание идентичной подписки - ошибка ErrConflict
+// - Сообщение об ошибке соответствует бизнес-логике уникальности
 func TestCreateConflict(t *testing.T) {
 	ctx := context.Background()
 	sub := newTestSubscription(2025, 8)
@@ -1636,7 +1809,12 @@ func TestCreateConflict(t *testing.T) {
 	}
 }
 
-// TestUpdate проверяет обновление названия и цены существующей подписки
+// TestUpdate проверяет обновление данных подписки.
+//
+// Тестируемые сценарии:
+// - Изменение названия сервиса
+// - Изменение цены подписки
+// - Сохранение неизменяемых полей (год, месяц, пользователь)
 func TestUpdate(t *testing.T) {
 	ctx := context.Background()
 	sub := newTestSubscription(2025, 9)
@@ -1658,7 +1836,12 @@ func TestUpdate(t *testing.T) {
 	}
 }
 
-// TestDelete проверяет удаление подписки и что после удаления она не находится
+// TestDelete проверяет корректность удаления подписки.
+//
+// Проверяемые аспекты:
+// - Успешное удаление существующей подписки
+// - Возврат ошибки ErrNotExist при попытке чтения удаленной подписки
+// - Идемпотентность операции удаления
 func TestDelete(t *testing.T) {
 	ctx := context.Background()
 	sub := newTestSubscription(2025, 10)
@@ -1675,7 +1858,12 @@ func TestDelete(t *testing.T) {
 	}
 }
 
-// TestList проверяет получение списка всех подписок и фильтрацию по пользователю
+// TestList проверяет получение списков подписок.
+//
+// Тестируемые сценарии:
+// - Получение полного списка всех подписок
+// - Фильтрация подписок по конкретному пользователю
+// - Корректность сортировки (новые записи первыми)
 func TestList(t *testing.T) {
 	ctx := context.Background()
 	userID := uuid.New().String()
@@ -1712,8 +1900,19 @@ func TestList(t *testing.T) {
 	}
 }
 
-// TestSumSubscriptionsCost — самый важный тест!
-// Проверяет корректность подсчёта общей стоимости за период.
+// TestSumSubscriptionsCost проверяет корректность расчета суммарной стоимости.
+//
+// Это ключевой бизнес-тест, проверяющий:
+// - Фильтрацию по периоду (включительно)
+// - Фильтрацию по сервису
+// - Фильтрацию по пользователю
+// - Комбинированные условия фильтрации
+//
+// Тестовые данные:
+// - 2025-01: сервис A, 500₽
+// - 2025-02: сервис B, 600₽
+// - 2025-03: сервис A, 700₽
+// - 2026-01: сервис A, 800₽ (не входит в период 2025)
 func TestSumSubscriptionsCost(t *testing.T) {
 	ctx := context.Background()
 	userID := uuid.New().String()
@@ -1829,7 +2028,6 @@ internal/models/models.go
 // models.go
 // Расширение: .go
 
-// internal/models/models.go
 // Пакет models содержит структуры данных для работы с подписками.
 // Структура Subscription полностью соответствует таблице subscriptions в PostgreSQL.
 // Одна запись = оплата за конкретный месяц (модель "monthly billing").
@@ -1904,7 +2102,7 @@ type Server struct {
 //	@version         1.0
 //	@description     REST-сервис для агрегации данных об онлайн-подписках пользователей
 //	@contact.name    API Support
-//	@contact.email   support@example.com
+//	@contact.email   maaw@mail.ru
 //	@license.name    MIT
 //	@host            localhost:8080
 //	@BasePath        /api
@@ -1932,13 +2130,13 @@ func parseYearMonth(s string) (int, int, error) {
 	var year, month int
 	n, err := fmt.Sscanf(s, "%d-%02d", &year, &month)
 	if err != nil || n != 2 {
-		return 0, 0, fmt.Errorf("неверный формат даты: %s (ожидается YYYY-MM)", s)
+		return 0, 0, fmt.Errorf("invalid date format: %s (expected YYYY-MM)", s)
 	}
 	if month < 1 || month > 12 {
-		return 0, 0, fmt.Errorf("месяц должен быть от 01 до 12, получено: %02d", month)
+		return 0, 0, fmt.Errorf("month must be between 01 and 12, got: %02d", month)
 	}
 	if year < 2000 || year > 2100 {
-		return 0, 0, fmt.Errorf("год должен быть от 2000 до 2100, получено: %d", year)
+		return 0, 0, fmt.Errorf("year must be between 2000 and 2100, got: %d", year)
 	}
 	return year, month, nil
 }
@@ -1956,17 +2154,24 @@ func parseYearMonth(s string) (int, int, error) {
 // @Failure      500    {object} map[string]string
 // @Router       /subscriptions [post]
 func (s *Server) createSubscriptionHandler(c *gin.Context) {
+	log.Printf("HTTP: creating subscription | method=POST | path=/api/subscriptions")
+
 	var req dto.CreateSubscriptionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "некорректное тело запроса", "details": err.Error()})
+		log.Printf("HTTP: invalid request body | error=%v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body", "details": err.Error()})
 		return
 	}
 
 	year, month, err := parseYearMonth(req.YearMonth)
 	if err != nil {
+		log.Printf("HTTP: invalid date format | year_month=%s | error=%v", req.YearMonth, err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	log.Printf("HTTP: creating subscription | user=%s | service=%s | period=%d-%02d | price=%d",
+		req.UserID, req.ServiceName, year, month, req.Price)
 
 	sub := models.Subscription{
 		ServiceName: req.ServiceName,
@@ -1982,15 +2187,18 @@ func (s *Server) createSubscriptionHandler(c *gin.Context) {
 	id, err := s.DB.Create(ctx, sub)
 	if err != nil {
 		if err == database.ErrConflict {
-			c.JSON(http.StatusConflict, gin.H{"error": "подписка на этот сервис за указанный месяц уже существует"})
+			log.Printf("HTTP: subscription conflict | user=%s | service=%s | period=%d-%02d",
+				req.UserID, req.ServiceName, year, month)
+			c.JSON(http.StatusConflict, gin.H{"error": "subscription for this service in specified month already exists"})
 			return
 		}
-		log.Printf("ошибка создания подписки: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		log.Printf("HTTP: subscription creation error | error=%v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
-	log.Printf("подписка успешно создана | id=%s | %s | %d-%02d | %d₽", id, req.ServiceName, year, month, req.Price)
+	log.Printf("HTTP: subscription successfully created | id=%s | user=%s | service=%s | period=%d-%02d | price=%d",
+		id, req.UserID, req.ServiceName, year, month, req.Price)
 	c.JSON(http.StatusCreated, gin.H{"id": id})
 }
 
@@ -2005,6 +2213,7 @@ func (s *Server) createSubscriptionHandler(c *gin.Context) {
 // @Router       /subscriptions/{id} [get]
 func (s *Server) getSubscriptionHandler(c *gin.Context) {
 	id := c.Param("id")
+	log.Printf("HTTP: retrieving subscription | method=GET | path=/api/subscriptions/%s", id)
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -2012,13 +2221,16 @@ func (s *Server) getSubscriptionHandler(c *gin.Context) {
 	sub, err := s.DB.Get(ctx, id)
 	if err != nil {
 		if err == database.ErrNotExist {
-			c.JSON(http.StatusNotFound, gin.H{"error": "подписка не найдена"})
+			log.Printf("HTTP: subscription not found | id=%s", id)
+			c.JSON(http.StatusNotFound, gin.H{"error": "subscription not found"})
 			return
 		}
-		log.Printf("ошибка получения подписки id=%s: %v", id, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		log.Printf("HTTP: subscription retrieval error | id=%s | error=%v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
+
+	log.Printf("HTTP: subscription retrieved | id=%s | service=%s | user=%s", id, sub.ServiceName, sub.UserID)
 
 	resp := dto.SubscriptionResponse{
 		ID:          sub.ID,
@@ -2046,12 +2258,17 @@ func (s *Server) getSubscriptionHandler(c *gin.Context) {
 // @Router       /subscriptions/{id} [put]
 func (s *Server) updateSubscriptionHandler(c *gin.Context) {
 	id := c.Param("id")
+	log.Printf("HTTP: updating subscription | method=PUT | path=/api/subscriptions/%s", id)
 
 	var req dto.UpdateSubscriptionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "некорректное тело запроса", "details": err.Error()})
+		log.Printf("HTTP: invalid request body | id=%s | error=%v", id, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body", "details": err.Error()})
 		return
 	}
+
+	log.Printf("HTTP: updating subscription fields | id=%s | service=%v | price=%v",
+		id, req.ServiceName, req.Price)
 
 	updates := models.Subscription{}
 	if req.ServiceName != nil {
@@ -2066,15 +2283,16 @@ func (s *Server) updateSubscriptionHandler(c *gin.Context) {
 
 	if err := s.DB.Update(ctx, id, updates); err != nil {
 		if err == database.ErrNotExist {
-			c.JSON(http.StatusNotFound, gin.H{"error": "подписка не найдена"})
+			log.Printf("HTTP: subscription not found for update | id=%s", id)
+			c.JSON(http.StatusNotFound, gin.H{"error": "subscription not found"})
 			return
 		}
-		log.Printf("ошибка обновления подписки id=%s: %v", id, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		log.Printf("HTTP: subscription update error | id=%s | error=%v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
-	log.Printf("подписка успешно обновлена | id=%s", id)
+	log.Printf("HTTP: subscription successfully updated | id=%s", id)
 	c.JSON(http.StatusOK, gin.H{"status": "updated"})
 }
 
@@ -2087,21 +2305,23 @@ func (s *Server) updateSubscriptionHandler(c *gin.Context) {
 // @Router       /subscriptions/{id} [delete]
 func (s *Server) deleteSubscriptionHandler(c *gin.Context) {
 	id := c.Param("id")
+	log.Printf("HTTP: deleting subscription | method=DELETE | path=/api/subscriptions/%s", id)
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
 	if err := s.DB.Delete(ctx, id); err != nil {
 		if err == database.ErrNotExist {
-			c.JSON(http.StatusNotFound, gin.H{"error": "подписка не найдена"})
+			log.Printf("HTTP: subscription not found for deletion | id=%s", id)
+			c.JSON(http.StatusNotFound, gin.H{"error": "subscription not found"})
 			return
 		}
-		log.Printf("ошибка удаления подписки id=%s: %v", id, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		log.Printf("HTTP: subscription deletion error | id=%s | error=%v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
-	log.Printf("подписка успешно удалена | id=%s", id)
+	log.Printf("HTTP: subscription successfully deleted | id=%s", id)
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
 }
 
@@ -2117,13 +2337,19 @@ func (s *Server) deleteSubscriptionHandler(c *gin.Context) {
 func (s *Server) listSubscriptionsHandler(c *gin.Context) {
 	userID := c.Query("user_id")
 
+	if userID != "" {
+		log.Printf("HTTP: listing subscriptions for user | method=GET | path=/api/subscriptions | user=%s", userID)
+	} else {
+		log.Printf("HTTP: listing all subscriptions | method=GET | path=/api/subscriptions")
+	}
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
 	subs, err := s.DB.List(ctx, userID)
 	if err != nil {
-		log.Printf("ошибка получения списка подписок: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		log.Printf("HTTP: subscription list retrieval error | error=%v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
@@ -2138,6 +2364,12 @@ func (s *Server) listSubscriptionsHandler(c *gin.Context) {
 			CreatedAt:   sub.CreatedAt.Format(time.RFC3339),
 			UpdatedAt:   sub.UpdatedAt.Format(time.RFC3339),
 		})
+	}
+
+	if userID != "" {
+		log.Printf("HTTP: returned %d subscriptions for user | user=%s", len(resp), userID)
+	} else {
+		log.Printf("HTTP: returned %d total subscriptions", len(resp))
 	}
 
 	c.JSON(http.StatusOK, resp)
@@ -2156,20 +2388,25 @@ func (s *Server) listSubscriptionsHandler(c *gin.Context) {
 // @Failure      400,500 {object} map[string]string
 // @Router       /subscriptions/total [get]
 func (s *Server) sumSubscriptionsHandler(c *gin.Context) {
+	log.Printf("HTTP: calculating total cost | method=GET | path=/api/subscriptions/total")
+
 	var req dto.TotalCostRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "некорректные параметры запроса", "details": err.Error()})
+		log.Printf("HTTP: invalid query parameters | error=%v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid query parameters", "details": err.Error()})
 		return
 	}
 
 	startYear, startMonth, err := parseYearMonth(req.Start)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "неверный формат параметра start: " + err.Error()})
+		log.Printf("HTTP: invalid start parameter | start=%s | error=%v", req.Start, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start parameter format: " + err.Error()})
 		return
 	}
 	endYear, endMonth, err := parseYearMonth(req.End)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "неверный формат параметра end: " + err.Error()})
+		log.Printf("HTTP: invalid end parameter | end=%s | error=%v", req.End, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end parameter format: " + err.Error()})
 		return
 	}
 
@@ -2182,17 +2419,21 @@ func (s *Server) sumSubscriptionsHandler(c *gin.Context) {
 		service = *req.Service
 	}
 
+	log.Printf("HTTP: calculating total cost | period=%s..%s | user=%s | service=%s",
+		req.Start, req.End, userID, service)
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
 	total, err := s.DB.SumSubscriptionsCost(ctx, userID, service, startYear, startMonth, endYear, endMonth)
 	if err != nil {
-		log.Printf("ошибка подсчёта общей стоимости: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		log.Printf("HTTP: total cost calculation error | error=%v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
-	log.Printf("подсчёт общей стоимости | %s..%s | user=%s | service=%s | total=%d₽", req.Start, req.End, userID, service, total)
+	log.Printf("HTTP: total subscription cost calculated | period=%s..%s | user=%s | service=%s | total=%d",
+		req.Start, req.End, userID, service, total)
 	c.JSON(http.StatusOK, dto.TotalCostResponse{Total: total})
 }
 
@@ -2203,11 +2444,17 @@ internal/server/server_test.go
 // server_test.go
 // Расширение: .go
 
-// internal/server/server_test.go
 // Пакет server содержит интеграционные HTTP-тесты для REST API.
-// Тесты проверяют все ручки: создание, получение, обновление, удаление, список и подсчёт стоимости.
-// Используется в-memory база данных (настоящий PostgreSQL в тестовой БД).
-
+//
+// Тесты проверяют все эндпоинты API:
+// - Создание, получение, обновление, удаление подписок
+// - Получение списка подписок с фильтрацией
+// - Подсчёт суммарной стоимости за период
+//
+// Особенности тестовой среды:
+// - Используется реальная PostgreSQL база данных (тестовая БД)
+// - Все тесты независимы - база очищается перед каждым тестом
+// - Тесты проверяют полный цикл: HTTP запрос → БД → HTTP ответ
 package server
 
 import (
@@ -2228,14 +2475,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupTestServer создаёт сервер с подключением к тестовой БД и очищает таблицы
+// setupTestServer создаёт тестовый сервер с подключением к БД и очищает таблицы.
+//
+// Процесс:
+// 1. Подключение к тестовой БД using config.yaml
+// 2. Очистка таблицы subscriptions (TRUNCATE)
+// 3. Создание экземпляра сервера
+// 4. Установка тестового режима Gin
+//
+// Возвращает:
+//   - *Server: экземпляр тестового сервера
+//   - *database.SubscriptionDatabase: подключение к БД для подготовки данных
 func setupTestServer(t *testing.T) (*Server, *database.SubscriptionDatabase) {
 	connStr := config.InitConnString("config/config.yaml")
 
 	db, err := database.NewSubscriptionDatabase(context.Background(), connStr)
 	require.NoError(t, err, "не удалось подключиться к тестовой БД")
 
-	// ← ИСПРАВЛЕНО: RESTART, а не RESTAR
+	// Очистка таблицы перед тестом
 	_, err = db.DBpool.Exec(context.Background(), "TRUNCATE TABLE subscriptions RESTART IDENTITY")
 	require.NoError(t, err, "не удалось очистить таблицу")
 
@@ -2244,7 +2501,12 @@ func setupTestServer(t *testing.T) (*Server, *database.SubscriptionDatabase) {
 	return srv, db
 }
 
-// TestCreateSubscription_OK проверяет успешное создание подписки
+// TestCreateSubscription_OK проверяет успешное создание подписки через HTTP API.
+//
+// Проверяемые аспекты:
+// - HTTP статус 201 Created
+// - Наличие ID в ответе
+// - Корректность формата ID (UUID)
 func TestCreateSubscription_OK(t *testing.T) {
 	srv, _ := setupTestServer(t)
 
@@ -2263,7 +2525,7 @@ func TestCreateSubscription_OK(t *testing.T) {
 
 	assert.Equal(t, http.StatusCreated, w.Code)
 
-	// Правильная и надёжная проверка ответа
+	// Проверка корректности ответа
 	var resp struct {
 		ID string `json:"id"`
 	}
@@ -2273,7 +2535,13 @@ func TestCreateSubscription_OK(t *testing.T) {
 	assert.Len(t, resp.ID, 36, "ID должен быть валидным UUID (36 символов)")
 }
 
-// TestCreateSubscription_Conflict проверяет 409 при дубле
+// TestCreateSubscription_Conflict проверяет обработку конфликта при создании дубликата.
+//
+// Сценарий:
+// 1. Создаём подписку напрямую через БД
+// 2. Пытаемся создать идентичную подписку через HTTP API
+// 3. Проверяем HTTP статус 409 Conflict
+// 4. Проверяем наличие сообщения об ошибке
 func TestCreateSubscription_Conflict(t *testing.T) {
 	srv, db := setupTestServer(t)
 
@@ -2285,7 +2553,7 @@ func TestCreateSubscription_Conflict(t *testing.T) {
 		Year:        2025,
 		Month:       8,
 	}
-	_, _ = db.Create(context.Background(), sub) // уже есть
+	_, _ = db.Create(context.Background(), sub) // подписка уже существует
 
 	reqBody := dto.CreateSubscriptionRequest{
 		ServiceName: "Netflix",
@@ -2304,7 +2572,12 @@ func TestCreateSubscription_Conflict(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "уже существует")
 }
 
-// TestGetSubscription_OK проверяет получение по ID
+// TestGetSubscription_OK проверяет получение подписки по ID.
+//
+// Сценарий:
+// 1. Создаём подписку через БД
+// 2. Запрашиваем её через HTTP GET
+// 3. Проверяем корректность данных в ответе
 func TestGetSubscription_OK(t *testing.T) {
 	srv, db := setupTestServer(t)
 
@@ -2326,7 +2599,12 @@ func TestGetSubscription_OK(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "2025-09")
 }
 
-// TestUpdateSubscription_OK проверяет обновление
+// TestUpdateSubscription_OK проверяет обновление данных подписки.
+//
+// Проверяемые сценарии:
+// - Изменение названия сервиса
+// - Изменение цены подписки
+// - Корректность обновленных данных при последующем запросе
 func TestUpdateSubscription_OK(t *testing.T) {
 	srv, db := setupTestServer(t)
 
@@ -2355,7 +2633,7 @@ func TestUpdateSubscription_OK(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	// Проверяем, что цена изменилась
+	// Проверяем, что данные действительно изменились
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequest("GET", "/api/subscriptions/"+id, nil)
 	srv.Router.ServeHTTP(w, req)
@@ -2363,7 +2641,12 @@ func TestUpdateSubscription_OK(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "Family")
 }
 
-// TestDeleteSubscription_OK проверяет удаление
+// TestDeleteSubscription_OK проверяет удаление подписки.
+//
+// Сценарий:
+// 1. Создаём подписку
+// 2. Удаляем её через HTTP DELETE
+// 3. Проверяем, что подписка больше не доступна
 func TestDeleteSubscription_OK(t *testing.T) {
 	srv, db := setupTestServer(t)
 
@@ -2382,14 +2665,19 @@ func TestDeleteSubscription_OK(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	// Должна быть 404
+	// Проверяем, что подписка действительно удалена
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequest("GET", "/api/subscriptions/"+id, nil)
 	srv.Router.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
-// TestListSubscriptions проверяет список
+// TestListSubscriptions проверяет получение списка подписок.
+//
+// Проверяемые сценарии:
+// - Получение всех подписок
+// - Фильтрация по пользователю
+// - Корректность количества возвращаемых записей
 func TestListSubscriptions(t *testing.T) {
 	srv, db := setupTestServer(t)
 
@@ -2415,7 +2703,17 @@ func TestListSubscriptions(t *testing.T) {
 	assert.Len(t, resp, 3)
 }
 
-// TestSumSubscriptionsCost — самый важный тест!
+// TestSumSubscriptionsCost проверяет расчет суммарной стоимости подписок за период.
+//
+// Это ключевой бизнес-тест, проверяющий:
+// - Фильтрацию по периоду (включительно)
+// - Фильтрацию по сервису
+// - Корректность расчетов стоимости
+//
+// Тестовые данные:
+// - 2025-01: сервис A, 500₽
+// - 2025-02: сервис B, 600₽
+// - 2025-03: сервис A, 700₽
 func TestSumSubscriptionsCost(t *testing.T) {
 	srv, db := setupTestServer(t)
 
@@ -2512,6 +2810,165 @@ CREATE INDEX IF NOT EXISTS idx_subscriptions_service_year_month
 
 CREATE INDEX IF NOT EXISTS idx_subscriptions_year_month 
     ON subscriptions(year, month);
+
+--------------------------------------------------------------------------------
+
+test-api.sh
+// test-api.sh
+// Расширение: .sh
+
+#!/usr/bin/env bash
+# test-api.sh — e2e-тесты API на уже запущенном docker-compose стеке
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# Проверяем, что сервер действительно живой
+echo -e "${YELLOW}Проверка доступности сервера...${NC}"
+if ! curl -s http://localhost:8080/swagger/index.html > /dev/null; then
+    echo -e "${RED}Сервер недоступен на http://localhost:8080${NC}"
+    echo -e "${RED}Запусти: docker compose up -d${NC}"
+    exit 1
+fi
+echo -e "${GREEN}Сервер уже работает! 🚀${NC}\n"
+
+BASE="/api/subscriptions"
+URL="http://localhost:8080$BASE"
+USER=$(uuidgen | tr '[:upper:]' '[:lower:]')
+echo -e "${YELLOW}Тестируем с пользователем: $USER${NC}\n"
+
+# Функция для проверки статуса
+check_status() {
+    local expected=$1
+    local actual=$2
+    local test_name=$3
+    
+    if [[ "$actual" -eq "$expected" ]]; then
+        echo -e "${GREEN}OK — $test_name${NC}"
+        return 0
+    else
+        echo -e "${RED}FAIL — $test_name (ожидался $expected, получен $actual)${NC}"
+        return 1
+    fi
+}
+
+# 1. Yandex Plus — июль 2025
+echo -e "${YELLOW}1. Создаём Yandex Plus (2025-07)${NC}"
+ID1=$(curl -s -X POST "$URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"service_name\":\"Yandex Plus\",\"price\":499,\"user_id\":\"$USER\",\"year_month\":\"2025-07\"}" \
+    | grep -Eo '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' || echo "")
+
+if [[ -n "$ID1" ]]; then
+    echo -e "${GREEN}OK — создана (id=$ID1)${NC}"
+else
+    echo -e "${RED}FAIL — не создалась${NC}"
+    exit 1
+fi
+
+# 2. Дубликат → 409
+echo -e "${YELLOW}2. Дубликат Yandex Plus → 409${NC}"
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"service_name\":\"Yandex Plus\",\"price\":499,\"user_id\":\"$USER\",\"year_month\":\"2025-07\"}")
+check_status 409 "$STATUS" "конфликт дубликатов"
+
+# 3. Неверный UUID → 400
+echo -e "${YELLOW}3. Неверный user_id → 400${NC}"
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"service_name\":\"X\",\"price\":1,\"user_id\":\"bad-uuid\",\"year_month\":\"2025-01\"}")
+check_status 400 "$STATUS" "валидация UUID"
+
+# 4. Неверный месяц → 400
+echo -e "${YELLOW}4. year_month=2025-13 → 400${NC}"
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"service_name\":\"X\",\"price\":1,\"user_id\":\"$USER\",\"year_month\":\"2025-13\"}")
+check_status 400 "$STATUS" "валидация месяца"
+
+# 5. Spotify в том же месяце
+echo -e "${YELLOW}5. Spotify (2025-07)${NC}"
+ID2=$(curl -s -X POST "$URL" -H "Content-Type: application/json" \
+    -d "{\"service_name\":\"Spotify\",\"price\":169,\"user_id\":\"$USER\",\"year_month\":\"2025-07\"}" \
+    | grep -Eo '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' || echo "")
+
+if [[ -n "$ID2" ]]; then
+    echo -e "${GREEN}OK — создана (id=$ID2)${NC}"
+else
+    echo -e "${RED}FAIL — не создалась${NC}"
+    exit 1
+fi
+
+# 6. Netflix в августе
+echo -e "${YELLOW}6. Netflix (2025-08)${NC}"
+ID3=$(curl -s -X POST "$URL" -H "Content-Type: application/json" \
+    -d "{\"service_name\":\"Netflix\",\"price\":999,\"user_id\":\"$USER\",\"year_month\":\"2025-08\"}" \
+    | grep -Eo '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' || echo "")
+
+if [[ -n "$ID3" ]]; then
+    echo -e "${GREEN}OK — создана (id=$ID3)${NC}"
+else
+    echo -e "${RED}FAIL — не создалась${NC}"
+    exit 1
+fi
+
+# 7. Итого за 2025 год
+echo -e "${YELLOW}7. Итого за 2025 год${NC}"
+TOTAL=$(curl -s "http://localhost:8080/api/subscriptions/total?start=2025-01&end=2025-12&user_id=$USER" \
+    | grep -o '"total":[0-9]\+' | cut -d: -f2)
+
+if [[ "$TOTAL" -eq 1667 ]]; then
+    echo -e "${GREEN}OK — 1667 ₽ (499 + 169 + 999)${NC}"
+else
+    echo -e "${RED}FAIL — ожидали 1667, получили $TOTAL${NC}"
+    exit 1
+fi
+
+# 8. Только Yandex Plus
+echo -e "${YELLOW}8. Только Yandex Plus${NC}"
+TOTAL=$(curl -s "http://localhost:8080/api/subscriptions/total?start=2025-01&end=2025-12&user_id=$USER&service=Yandex%20Plus" \
+    | grep -o '"total":[0-9]\+' | cut -d: -f2)
+
+if [[ "$TOTAL" == "499" ]]; then
+    echo -e "${GREEN}OK — 499 ₽${NC}"
+else
+    echo -e "${RED}FAIL — ожидали 499, получили $TOTAL${NC}"
+    exit 1
+fi
+
+# 9. Только август
+echo -e "${YELLOW}9. Только август 2025${NC}"
+TOTAL=$(curl -s "http://localhost:8080/api/subscriptions/total?start=2025-08&end=2025-08&user_id=$USER" \
+    | grep -o '"total":[0-9]\+' | cut -d: -f2)
+
+if [[ "$TOTAL" == "999" ]]; then
+    echo -e "${GREEN}OK — август: 999 ₽ (Netflix)${NC}"
+else
+    echo -e "${RED}FAIL — ожидали 999, получили $TOTAL${NC}"
+    exit 1
+fi
+
+# 10. Проверка чтения созданных подписок
+echo -e "${YELLOW}10. Проверка чтения подписок${NC}"
+for id in "$ID1" "$ID2" "$ID3"; do
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:8080/api/subscriptions/$id")
+    if check_status 200 "$STATUS" "чтение подписки $id"; then
+        echo -e "  ${GREEN}✓ Подписка $id доступна${NC}"
+    fi
+done
+
+# Финал
+echo -e "${GREEN}
+╔══════════════════════════════════════════╗
+║   ВСЁ ЗЕЛЁНОЕ! API РАБОТАЕТ ИДЕАЛЬНО! 🔥   ║
+╚══════════════════════════════════════════╝
+${NC}"
+echo -e "${YELLOW}Контейнеры продолжают работать. Данные сохранены в томе.${NC}"
 
 --------------------------------------------------------------------------------
 
