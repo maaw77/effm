@@ -1,8 +1,14 @@
-// internal/server/server_test.go
 // Пакет server содержит интеграционные HTTP-тесты для REST API.
-// Тесты проверяют все ручки: создание, получение, обновление, удаление, список и подсчёт стоимости.
-// Используется в-memory база данных (настоящий PostgreSQL в тестовой БД).
-
+//
+// Тесты проверяют все эндпоинты API:
+// - Создание, получение, обновление, удаление подписок
+// - Получение списка подписок с фильтрацией
+// - Подсчёт суммарной стоимости за период
+//
+// Особенности тестовой среды:
+// - Используется реальная PostgreSQL база данных (тестовая БД)
+// - Все тесты независимы - база очищается перед каждым тестом
+// - Тесты проверяют полный цикл: HTTP запрос → БД → HTTP ответ
 package server
 
 import (
@@ -23,14 +29,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupTestServer создаёт сервер с подключением к тестовой БД и очищает таблицы
+// setupTestServer создаёт тестовый сервер с подключением к БД и очищает таблицы.
+//
+// Процесс:
+// 1. Подключение к тестовой БД using config.yaml
+// 2. Очистка таблицы subscriptions (TRUNCATE)
+// 3. Создание экземпляра сервера
+// 4. Установка тестового режима Gin
+//
+// Возвращает:
+//   - *Server: экземпляр тестового сервера
+//   - *database.SubscriptionDatabase: подключение к БД для подготовки данных
 func setupTestServer(t *testing.T) (*Server, *database.SubscriptionDatabase) {
 	connStr := config.InitConnString("config/config.yaml")
 
 	db, err := database.NewSubscriptionDatabase(context.Background(), connStr)
 	require.NoError(t, err, "не удалось подключиться к тестовой БД")
 
-	// ← ИСПРАВЛЕНО: RESTART, а не RESTAR
+	// Очистка таблицы перед тестом
 	_, err = db.DBpool.Exec(context.Background(), "TRUNCATE TABLE subscriptions RESTART IDENTITY")
 	require.NoError(t, err, "не удалось очистить таблицу")
 
@@ -39,7 +55,12 @@ func setupTestServer(t *testing.T) (*Server, *database.SubscriptionDatabase) {
 	return srv, db
 }
 
-// TestCreateSubscription_OK проверяет успешное создание подписки
+// TestCreateSubscription_OK проверяет успешное создание подписки через HTTP API.
+//
+// Проверяемые аспекты:
+// - HTTP статус 201 Created
+// - Наличие ID в ответе
+// - Корректность формата ID (UUID)
 func TestCreateSubscription_OK(t *testing.T) {
 	srv, _ := setupTestServer(t)
 
@@ -58,7 +79,7 @@ func TestCreateSubscription_OK(t *testing.T) {
 
 	assert.Equal(t, http.StatusCreated, w.Code)
 
-	// Правильная и надёжная проверка ответа
+	// Проверка корректности ответа
 	var resp struct {
 		ID string `json:"id"`
 	}
@@ -68,7 +89,13 @@ func TestCreateSubscription_OK(t *testing.T) {
 	assert.Len(t, resp.ID, 36, "ID должен быть валидным UUID (36 символов)")
 }
 
-// TestCreateSubscription_Conflict проверяет 409 при дубле
+// TestCreateSubscription_Conflict проверяет обработку конфликта при создании дубликата.
+//
+// Сценарий:
+// 1. Создаём подписку напрямую через БД
+// 2. Пытаемся создать идентичную подписку через HTTP API
+// 3. Проверяем HTTP статус 409 Conflict
+// 4. Проверяем наличие сообщения об ошибке
 func TestCreateSubscription_Conflict(t *testing.T) {
 	srv, db := setupTestServer(t)
 
@@ -80,7 +107,7 @@ func TestCreateSubscription_Conflict(t *testing.T) {
 		Year:        2025,
 		Month:       8,
 	}
-	_, _ = db.Create(context.Background(), sub) // уже есть
+	_, _ = db.Create(context.Background(), sub) // подписка уже существует
 
 	reqBody := dto.CreateSubscriptionRequest{
 		ServiceName: "Netflix",
@@ -99,7 +126,12 @@ func TestCreateSubscription_Conflict(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "уже существует")
 }
 
-// TestGetSubscription_OK проверяет получение по ID
+// TestGetSubscription_OK проверяет получение подписки по ID.
+//
+// Сценарий:
+// 1. Создаём подписку через БД
+// 2. Запрашиваем её через HTTP GET
+// 3. Проверяем корректность данных в ответе
 func TestGetSubscription_OK(t *testing.T) {
 	srv, db := setupTestServer(t)
 
@@ -121,7 +153,12 @@ func TestGetSubscription_OK(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "2025-09")
 }
 
-// TestUpdateSubscription_OK проверяет обновление
+// TestUpdateSubscription_OK проверяет обновление данных подписки.
+//
+// Проверяемые сценарии:
+// - Изменение названия сервиса
+// - Изменение цены подписки
+// - Корректность обновленных данных при последующем запросе
 func TestUpdateSubscription_OK(t *testing.T) {
 	srv, db := setupTestServer(t)
 
@@ -150,7 +187,7 @@ func TestUpdateSubscription_OK(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	// Проверяем, что цена изменилась
+	// Проверяем, что данные действительно изменились
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequest("GET", "/api/subscriptions/"+id, nil)
 	srv.Router.ServeHTTP(w, req)
@@ -158,7 +195,12 @@ func TestUpdateSubscription_OK(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "Family")
 }
 
-// TestDeleteSubscription_OK проверяет удаление
+// TestDeleteSubscription_OK проверяет удаление подписки.
+//
+// Сценарий:
+// 1. Создаём подписку
+// 2. Удаляем её через HTTP DELETE
+// 3. Проверяем, что подписка больше не доступна
 func TestDeleteSubscription_OK(t *testing.T) {
 	srv, db := setupTestServer(t)
 
@@ -177,14 +219,19 @@ func TestDeleteSubscription_OK(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	// Должна быть 404
+	// Проверяем, что подписка действительно удалена
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequest("GET", "/api/subscriptions/"+id, nil)
 	srv.Router.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
-// TestListSubscriptions проверяет список
+// TestListSubscriptions проверяет получение списка подписок.
+//
+// Проверяемые сценарии:
+// - Получение всех подписок
+// - Фильтрация по пользователю
+// - Корректность количества возвращаемых записей
 func TestListSubscriptions(t *testing.T) {
 	srv, db := setupTestServer(t)
 
@@ -210,7 +257,17 @@ func TestListSubscriptions(t *testing.T) {
 	assert.Len(t, resp, 3)
 }
 
-// TestSumSubscriptionsCost — самый важный тест!
+// TestSumSubscriptionsCost проверяет расчет суммарной стоимости подписок за период.
+//
+// Это ключевой бизнес-тест, проверяющий:
+// - Фильтрацию по периоду (включительно)
+// - Фильтрацию по сервису
+// - Корректность расчетов стоимости
+//
+// Тестовые данные:
+// - 2025-01: сервис A, 500₽
+// - 2025-02: сервис B, 600₽
+// - 2025-03: сервис A, 700₽
 func TestSumSubscriptionsCost(t *testing.T) {
 	srv, db := setupTestServer(t)
 

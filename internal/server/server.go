@@ -29,7 +29,7 @@ type Server struct {
 //	@version         1.0
 //	@description     REST-сервис для агрегации данных об онлайн-подписках пользователей
 //	@contact.name    API Support
-//	@contact.email   support@example.com
+//	@contact.email   maaw@mail.ru
 //	@license.name    MIT
 //	@host            localhost:8080
 //	@BasePath        /api
@@ -57,13 +57,13 @@ func parseYearMonth(s string) (int, int, error) {
 	var year, month int
 	n, err := fmt.Sscanf(s, "%d-%02d", &year, &month)
 	if err != nil || n != 2 {
-		return 0, 0, fmt.Errorf("неверный формат даты: %s (ожидается YYYY-MM)", s)
+		return 0, 0, fmt.Errorf("invalid date format: %s (expected YYYY-MM)", s)
 	}
 	if month < 1 || month > 12 {
-		return 0, 0, fmt.Errorf("месяц должен быть от 01 до 12, получено: %02d", month)
+		return 0, 0, fmt.Errorf("month must be between 01 and 12, got: %02d", month)
 	}
 	if year < 2000 || year > 2100 {
-		return 0, 0, fmt.Errorf("год должен быть от 2000 до 2100, получено: %d", year)
+		return 0, 0, fmt.Errorf("year must be between 2000 and 2100, got: %d", year)
 	}
 	return year, month, nil
 }
@@ -81,17 +81,24 @@ func parseYearMonth(s string) (int, int, error) {
 // @Failure      500    {object} map[string]string
 // @Router       /subscriptions [post]
 func (s *Server) createSubscriptionHandler(c *gin.Context) {
+	log.Printf("HTTP: creating subscription | method=POST | path=/api/subscriptions")
+
 	var req dto.CreateSubscriptionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "некорректное тело запроса", "details": err.Error()})
+		log.Printf("HTTP: invalid request body | error=%v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body", "details": err.Error()})
 		return
 	}
 
 	year, month, err := parseYearMonth(req.YearMonth)
 	if err != nil {
+		log.Printf("HTTP: invalid date format | year_month=%s | error=%v", req.YearMonth, err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	log.Printf("HTTP: creating subscription | user=%s | service=%s | period=%d-%02d | price=%d",
+		req.UserID, req.ServiceName, year, month, req.Price)
 
 	sub := models.Subscription{
 		ServiceName: req.ServiceName,
@@ -107,15 +114,18 @@ func (s *Server) createSubscriptionHandler(c *gin.Context) {
 	id, err := s.DB.Create(ctx, sub)
 	if err != nil {
 		if err == database.ErrConflict {
-			c.JSON(http.StatusConflict, gin.H{"error": "подписка на этот сервис за указанный месяц уже существует"})
+			log.Printf("HTTP: subscription conflict | user=%s | service=%s | period=%d-%02d",
+				req.UserID, req.ServiceName, year, month)
+			c.JSON(http.StatusConflict, gin.H{"error": "subscription for this service in specified month already exists"})
 			return
 		}
-		log.Printf("ошибка создания подписки: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		log.Printf("HTTP: subscription creation error | error=%v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
-	log.Printf("подписка успешно создана | id=%s | %s | %d-%02d | %d₽", id, req.ServiceName, year, month, req.Price)
+	log.Printf("HTTP: subscription successfully created | id=%s | user=%s | service=%s | period=%d-%02d | price=%d",
+		id, req.UserID, req.ServiceName, year, month, req.Price)
 	c.JSON(http.StatusCreated, gin.H{"id": id})
 }
 
@@ -130,6 +140,7 @@ func (s *Server) createSubscriptionHandler(c *gin.Context) {
 // @Router       /subscriptions/{id} [get]
 func (s *Server) getSubscriptionHandler(c *gin.Context) {
 	id := c.Param("id")
+	log.Printf("HTTP: retrieving subscription | method=GET | path=/api/subscriptions/%s", id)
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -137,13 +148,16 @@ func (s *Server) getSubscriptionHandler(c *gin.Context) {
 	sub, err := s.DB.Get(ctx, id)
 	if err != nil {
 		if err == database.ErrNotExist {
-			c.JSON(http.StatusNotFound, gin.H{"error": "подписка не найдена"})
+			log.Printf("HTTP: subscription not found | id=%s", id)
+			c.JSON(http.StatusNotFound, gin.H{"error": "subscription not found"})
 			return
 		}
-		log.Printf("ошибка получения подписки id=%s: %v", id, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		log.Printf("HTTP: subscription retrieval error | id=%s | error=%v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
+
+	log.Printf("HTTP: subscription retrieved | id=%s | service=%s | user=%s", id, sub.ServiceName, sub.UserID)
 
 	resp := dto.SubscriptionResponse{
 		ID:          sub.ID,
@@ -171,12 +185,17 @@ func (s *Server) getSubscriptionHandler(c *gin.Context) {
 // @Router       /subscriptions/{id} [put]
 func (s *Server) updateSubscriptionHandler(c *gin.Context) {
 	id := c.Param("id")
+	log.Printf("HTTP: updating subscription | method=PUT | path=/api/subscriptions/%s", id)
 
 	var req dto.UpdateSubscriptionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "некорректное тело запроса", "details": err.Error()})
+		log.Printf("HTTP: invalid request body | id=%s | error=%v", id, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body", "details": err.Error()})
 		return
 	}
+
+	log.Printf("HTTP: updating subscription fields | id=%s | service=%v | price=%v",
+		id, req.ServiceName, req.Price)
 
 	updates := models.Subscription{}
 	if req.ServiceName != nil {
@@ -191,15 +210,16 @@ func (s *Server) updateSubscriptionHandler(c *gin.Context) {
 
 	if err := s.DB.Update(ctx, id, updates); err != nil {
 		if err == database.ErrNotExist {
-			c.JSON(http.StatusNotFound, gin.H{"error": "подписка не найдена"})
+			log.Printf("HTTP: subscription not found for update | id=%s", id)
+			c.JSON(http.StatusNotFound, gin.H{"error": "subscription not found"})
 			return
 		}
-		log.Printf("ошибка обновления подписки id=%s: %v", id, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		log.Printf("HTTP: subscription update error | id=%s | error=%v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
-	log.Printf("подписка успешно обновлена | id=%s", id)
+	log.Printf("HTTP: subscription successfully updated | id=%s", id)
 	c.JSON(http.StatusOK, gin.H{"status": "updated"})
 }
 
@@ -212,21 +232,23 @@ func (s *Server) updateSubscriptionHandler(c *gin.Context) {
 // @Router       /subscriptions/{id} [delete]
 func (s *Server) deleteSubscriptionHandler(c *gin.Context) {
 	id := c.Param("id")
+	log.Printf("HTTP: deleting subscription | method=DELETE | path=/api/subscriptions/%s", id)
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
 	if err := s.DB.Delete(ctx, id); err != nil {
 		if err == database.ErrNotExist {
-			c.JSON(http.StatusNotFound, gin.H{"error": "подписка не найдена"})
+			log.Printf("HTTP: subscription not found for deletion | id=%s", id)
+			c.JSON(http.StatusNotFound, gin.H{"error": "subscription not found"})
 			return
 		}
-		log.Printf("ошибка удаления подписки id=%s: %v", id, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		log.Printf("HTTP: subscription deletion error | id=%s | error=%v", id, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
-	log.Printf("подписка успешно удалена | id=%s", id)
+	log.Printf("HTTP: subscription successfully deleted | id=%s", id)
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
 }
 
@@ -242,13 +264,19 @@ func (s *Server) deleteSubscriptionHandler(c *gin.Context) {
 func (s *Server) listSubscriptionsHandler(c *gin.Context) {
 	userID := c.Query("user_id")
 
+	if userID != "" {
+		log.Printf("HTTP: listing subscriptions for user | method=GET | path=/api/subscriptions | user=%s", userID)
+	} else {
+		log.Printf("HTTP: listing all subscriptions | method=GET | path=/api/subscriptions")
+	}
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
 	subs, err := s.DB.List(ctx, userID)
 	if err != nil {
-		log.Printf("ошибка получения списка подписок: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		log.Printf("HTTP: subscription list retrieval error | error=%v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
@@ -263,6 +291,12 @@ func (s *Server) listSubscriptionsHandler(c *gin.Context) {
 			CreatedAt:   sub.CreatedAt.Format(time.RFC3339),
 			UpdatedAt:   sub.UpdatedAt.Format(time.RFC3339),
 		})
+	}
+
+	if userID != "" {
+		log.Printf("HTTP: returned %d subscriptions for user | user=%s", len(resp), userID)
+	} else {
+		log.Printf("HTTP: returned %d total subscriptions", len(resp))
 	}
 
 	c.JSON(http.StatusOK, resp)
@@ -281,20 +315,25 @@ func (s *Server) listSubscriptionsHandler(c *gin.Context) {
 // @Failure      400,500 {object} map[string]string
 // @Router       /subscriptions/total [get]
 func (s *Server) sumSubscriptionsHandler(c *gin.Context) {
+	log.Printf("HTTP: calculating total cost | method=GET | path=/api/subscriptions/total")
+
 	var req dto.TotalCostRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "некорректные параметры запроса", "details": err.Error()})
+		log.Printf("HTTP: invalid query parameters | error=%v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid query parameters", "details": err.Error()})
 		return
 	}
 
 	startYear, startMonth, err := parseYearMonth(req.Start)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "неверный формат параметра start: " + err.Error()})
+		log.Printf("HTTP: invalid start parameter | start=%s | error=%v", req.Start, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start parameter format: " + err.Error()})
 		return
 	}
 	endYear, endMonth, err := parseYearMonth(req.End)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "неверный формат параметра end: " + err.Error()})
+		log.Printf("HTTP: invalid end parameter | end=%s | error=%v", req.End, err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end parameter format: " + err.Error()})
 		return
 	}
 
@@ -307,16 +346,20 @@ func (s *Server) sumSubscriptionsHandler(c *gin.Context) {
 		service = *req.Service
 	}
 
+	log.Printf("HTTP: calculating total cost | period=%s..%s | user=%s | service=%s",
+		req.Start, req.End, userID, service)
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
 	total, err := s.DB.SumSubscriptionsCost(ctx, userID, service, startYear, startMonth, endYear, endMonth)
 	if err != nil {
-		log.Printf("ошибка подсчёта общей стоимости: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "внутренняя ошибка сервера"})
+		log.Printf("HTTP: total cost calculation error | error=%v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
-	log.Printf("подсчёт общей стоимости | %s..%s | user=%s | service=%s | total=%d₽", req.Start, req.End, userID, service, total)
+	log.Printf("HTTP: total subscription cost calculated | period=%s..%s | user=%s | service=%s | total=%d",
+		req.Start, req.End, userID, service, total)
 	c.JSON(http.StatusOK, dto.TotalCostResponse{Total: total})
 }

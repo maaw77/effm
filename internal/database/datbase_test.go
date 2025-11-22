@@ -1,7 +1,9 @@
-// internal/database/database_test.go
 // Пакет database содержит модульные тесты для слоя работы с БД.
-// Тесты проверяют корректность всех операций: создание, чтение, обновление, удаление,
-// уникальность записей и главное — правильность подсчёта общей стоимости за период.
+//
+// Тесты проверяют корректность всех операций CRUD:
+// - Создание, чтение, обновление, удаление подписок
+// - Обработку конфликтов уникальности
+// - Корректность подсчёта общей стоимости за период
 
 package database
 
@@ -17,7 +19,14 @@ import (
 var testDB *SubscriptionDatabase
 
 // TestMain выполняется один раз до и после всех тестов.
-// Подключаемся к тестовой БД, очищаем таблицу и закрываем соединение в конце.
+//
+// Процесс инициализации:
+// 1. Подключение к тестовой БД using config.yaml
+// 2. Очистка таблицы subscriptions
+// 3. Запуск всех тестов
+// 4. Закрытие соединения с БД
+//
+// Важно: таблица полностью очищается (TRUNCATE) перед запуском тестовой серии.
 func TestMain(m *testing.M) {
 	ctx := context.Background()
 
@@ -29,7 +38,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic("failed to connect to test database: " + err.Error())
 	}
-	defer testDB.Close() // ← исправлено: было testTestDB
+	defer testDB.Close()
 
 	// Очищаем таблицу перед запуском тестов
 	_, err = testDB.DBpool.Exec(ctx, "TRUNCATE TABLE subscriptions RESTART IDENTITY")
@@ -40,7 +49,16 @@ func TestMain(m *testing.M) {
 	m.Run()
 }
 
-// newTestSubscription — вспомогательная функция для создания тестовой подписки
+// newTestSubscription создает тестовый объект подписки с уникальным UserID.
+//
+// Параметры:
+//
+//	year  - год подписки
+//	month - месяц подписки
+//
+// Возвращает:
+//
+//	models.Subscription с заполненными обязательными полями
 func newTestSubscription(year, month int) models.Subscription {
 	return models.Subscription{
 		ServiceName: "TestService",
@@ -51,7 +69,12 @@ func newTestSubscription(year, month int) models.Subscription {
 	}
 }
 
-// TestCreateAndGet проверяет создание подписки и её последующее чтение по ID
+// TestCreateAndGet проверяет базовый сценарий создания и чтения подписки.
+//
+// Тест проверяет:
+// - Успешное создание подписки в БД
+// - Корректное чтение созданной подписки по ID
+// - Соответствие всех полей исходным данным
 func TestCreateAndGet(t *testing.T) {
 	ctx := context.Background()
 	sub := newTestSubscription(2025, 7)
@@ -75,7 +98,12 @@ func TestCreateAndGet(t *testing.T) {
 	}
 }
 
-// TestCreateConflict проверяет, что нельзя создать две одинаковые подписки за один месяц
+// TestCreateConflict проверяет обработку конфликта уникальности.
+//
+// Ожидаемое поведение:
+// - Первое создание подписки - успешно
+// - Второе создание идентичной подписки - ошибка ErrConflict
+// - Сообщение об ошибке соответствует бизнес-логике уникальности
 func TestCreateConflict(t *testing.T) {
 	ctx := context.Background()
 	sub := newTestSubscription(2025, 8)
@@ -91,7 +119,12 @@ func TestCreateConflict(t *testing.T) {
 	}
 }
 
-// TestUpdate проверяет обновление названия и цены существующей подписки
+// TestUpdate проверяет обновление данных подписки.
+//
+// Тестируемые сценарии:
+// - Изменение названия сервиса
+// - Изменение цены подписки
+// - Сохранение неизменяемых полей (год, месяц, пользователь)
 func TestUpdate(t *testing.T) {
 	ctx := context.Background()
 	sub := newTestSubscription(2025, 9)
@@ -113,7 +146,12 @@ func TestUpdate(t *testing.T) {
 	}
 }
 
-// TestDelete проверяет удаление подписки и что после удаления она не находится
+// TestDelete проверяет корректность удаления подписки.
+//
+// Проверяемые аспекты:
+// - Успешное удаление существующей подписки
+// - Возврат ошибки ErrNotExist при попытке чтения удаленной подписки
+// - Идемпотентность операции удаления
 func TestDelete(t *testing.T) {
 	ctx := context.Background()
 	sub := newTestSubscription(2025, 10)
@@ -130,7 +168,12 @@ func TestDelete(t *testing.T) {
 	}
 }
 
-// TestList проверяет получение списка всех подписок и фильтрацию по пользователю
+// TestList проверяет получение списков подписок.
+//
+// Тестируемые сценарии:
+// - Получение полного списка всех подписок
+// - Фильтрация подписок по конкретному пользователю
+// - Корректность сортировки (новые записи первыми)
 func TestList(t *testing.T) {
 	ctx := context.Background()
 	userID := uuid.New().String()
@@ -167,8 +210,19 @@ func TestList(t *testing.T) {
 	}
 }
 
-// TestSumSubscriptionsCost — самый важный тест!
-// Проверяет корректность подсчёта общей стоимости за период.
+// TestSumSubscriptionsCost проверяет корректность расчета суммарной стоимости.
+//
+// Это ключевой бизнес-тест, проверяющий:
+// - Фильтрацию по периоду (включительно)
+// - Фильтрацию по сервису
+// - Фильтрацию по пользователю
+// - Комбинированные условия фильтрации
+//
+// Тестовые данные:
+// - 2025-01: сервис A, 500₽
+// - 2025-02: сервис B, 600₽
+// - 2025-03: сервис A, 700₽
+// - 2026-01: сервис A, 800₽ (не входит в период 2025)
 func TestSumSubscriptionsCost(t *testing.T) {
 	ctx := context.Background()
 	userID := uuid.New().String()

@@ -1,4 +1,3 @@
-// internal/models/models.go
 // Пакет models содержит структуры данных для работы с подписками.
 // Структура Subscription полностью соответствует таблице subscriptions в PostgreSQL.
 // Одна запись = оплата за конкретный месяц (модель "monthly billing").
